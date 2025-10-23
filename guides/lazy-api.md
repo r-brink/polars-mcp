@@ -64,31 +64,15 @@ print(lf.explain())
 - Only reads selected columns
 - Filters during scan (not after)
 
-## Streaming for Large Data
-
-```python
-lf = (
-    pl.scan_csv("huge_file.csv")
-    .filter(pl.col("value") > 0)
-    .group_by("category")
-    .agg(pl.col("value").sum())
-)
-
-# Process in streaming mode (constant memory)
-result = lf.collect(streaming=True)
-```
-
 ## Composition Pattern
 
 Build complex queries step by step:
 
 ```python
 # Base query
-base = pl.scan_csv("data.csv")
+data = pl.scan_csv("data.csv")
 
-# Add filters conditionally
-if filter_active:
-    base = base.filter(pl.col("status") == "active")
+base = data.filter(pl.col("status") == "active")
 
 # Add aggregations
 result = (
