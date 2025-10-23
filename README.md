@@ -38,9 +38,7 @@ polars-mcp/
 
 ## Usage
 
-### With Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to `../claude_desktop_config.json`:
 
 ```json
 {
@@ -60,7 +58,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### With Cursor
 
-Add to `~/.cursor/mcp.json`:
+Add to `../.cursor/mcp.json`:
 
 ```json
 {
@@ -163,41 +161,3 @@ Guide to lazy evaluation:
 - Query optimization (predicate pushdown, projection pushdown)
 - When to use each approach
 - Best practices for large datasets
-
-## API Coverage
-
-Indexes the following from your installed Polars package:
-
-- DataFrame methods
-- LazyFrame methods
-- Series methods
-- Expr methods
-- Top-level functions
-
-## How It Works
-
-1. On first use, introspects the installed `polars` package
-2. Builds an in-memory index of all public API elements
-3. Searches through function/method names and docstrings
-4. Returns documentation directly from Python's `inspect` module
-
-No web scraping, no bundled files, no external APIs.
-
-## Limitations
-
-- Only covers API reference (no User Guide concepts/tutorials)
-- Requires Polars to be installed
-- Documentation quality depends on Polars docstrings
-
-## Future Enhancements
-
-Planned for later iterations:
-
-- Pandas to Polars code conversion
-- User Guide content from bundled markdown
-- Example code extraction
-- Performance comparison explanations
-
-## License
-
-MIT
