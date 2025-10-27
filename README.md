@@ -8,7 +8,6 @@ MCP server providing Polars API reference documentation via introspection of the
 - Get full documentation for any Polars function, method, or class
 - Always up-to-date with your installed Polars version
 - No external dependencies or pre-built docs needed
-- Lightweight (< 10MB)
 
 ## Installation
 
@@ -16,11 +15,11 @@ Requires Python 3.10+ and uv.
 
 ```bash
 # Clone repository
-git clone <repo-url>
+git clone https://github.com/r-brink/polars-mcp
 cd polars-mcp
 
 # Install with uv
-uv pip install -e .
+uv pip install .
 ```
 
 ## Project Structure
@@ -38,27 +37,7 @@ polars-mcp/
 
 ## Usage
 
-Add to `../claude_desktop_config.json`:
-
-```json
-{
-    "mcpServers": {
-        "polars": {
-            "command": "uv",
-            "args": [
-                "--directory",
-                "/path/to/polars-mcp",
-                "run",
-                "polars_mcp.py"
-            ]
-        }
-    }
-}
-```
-
-### With Cursor
-
-Add to `../.cursor/mcp.json`:
+Refer to the documentation on the Model Context Protocol website on how to [connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers) for an extensive guide.
 
 ```json
 {
