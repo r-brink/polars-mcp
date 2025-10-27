@@ -54,7 +54,7 @@ def build_api_index() -> Dict[str, Any]:
 
     index = {}
 
-    # Main classes to document
+    # Main classes to document (with methods)
     main_classes = [
         ("DataFrame", pl.DataFrame),
         ("LazyFrame", pl.LazyFrame),
@@ -100,19 +100,28 @@ def build_api_index() -> Dict[str, Any]:
             except (AttributeError, TypeError):
                 continue
 
-    # Index top-level functions
+    # Index top-level functions and classes
     for name in dir(pl):
         if name.startswith("_"):
             continue
 
         obj = getattr(pl, name)
 
-        # Skip classes we already indexed
+        # Skip classes we already indexed with methods
         if inspect.isclass(obj) and name in [c[0] for c in main_classes]:
             continue
 
+        # Add other classes
+        if inspect.isclass(obj):
+            doc = inspect.getdoc(obj)
+            index[name] = {
+                "type": "class",
+                "full_name": f"polars.{name}",
+                "docstring": doc or "No documentation available",
+                "signature": "",
+            }
         # Add functions
-        if callable(obj) and not inspect.isclass(obj):
+        elif callable(obj):
             doc = inspect.getdoc(obj)
 
             try:
@@ -144,27 +153,42 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
 
     Args:
         query: Search query (matches against names and docstrings)
+               Can be multiple space-separated terms (OR logic)
         limit: Maximum number of results
 
     Returns:
-        List of matching API items
+        List of matching API items, prioritizing name matches
     """
     index = get_api_index()
-    query_lower = query.lower()
-    results = []
+
+    # Split query into terms for OR logic
+    query_terms = [term.strip().lower() for term in query.split() if term.strip()]
+
+    name_matches = []  # Matches in name (higher priority)
+    doc_matches = []  # Matches only in docstring (lower priority)
+    seen = set()  # Track which items we've already added
 
     for name, info in index.items():
-        # Check if query matches name or appears in docstring
         name_lower = name.lower()
         doc_lower = info["docstring"].lower()
 
-        if query_lower in name_lower or query_lower in doc_lower:
-            results.append({"name": name, **info})
+        # Check if any query term matches
+        for term in query_terms:
+            if name not in seen:
+                if term in name_lower:
+                    # Name match - high priority
+                    name_matches.append({"name": name, **info})
+                    seen.add(name)
+                    break
+                elif term in doc_lower:
+                    # Docstring match - lower priority
+                    doc_matches.append({"name": name, **info})
+                    seen.add(name)
+                    break
 
-            if len(results) >= limit:
-                break
-
-    return results
+    # Combine results: name matches first, then doc matches
+    results = name_matches + doc_matches
+    return results[:limit]
 
 
 def format_api_item_markdown(item: Dict[str, Any]) -> str:
@@ -192,7 +216,7 @@ class SearchAPIInput(BaseModel):
 
     query: str = Field(
         ...,
-        description="Search query to find API functions, methods, or classes (e.g., 'groupby', 'filter', 'lazy')",
+        description="Search query to find API functions, methods, or classes. Can include multiple space-separated terms (e.g., 'Int32 Float64', 'filter select')",
         min_length=1,
         max_length=100,
     )
