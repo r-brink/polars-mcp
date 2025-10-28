@@ -40,6 +40,14 @@ class ResponseFormat(str, Enum):
     JSON = "json"
 
 
+class GuideType(str, Enum):
+    """Available guide types."""
+
+    CONTEXTS = "contexts"
+    EXPRESSIONS = "expressions"
+    LAZY_API = "lazy-api"
+
+
 # API Index - built on first access
 _api_index: Optional[Dict[str, Any]] = None
 
@@ -209,6 +217,17 @@ def format_api_item_markdown(item: Dict[str, Any]) -> str:
 
 
 # Tool Input Models
+class GetGuideInput(BaseModel):
+    """Input for getting a conceptual guide."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    guide: GuideType = Field(
+        ...,
+        description="Which guide to retrieve: 'contexts' for expression contexts, 'expressions' for expression patterns, 'lazy-api' for lazy evaluation",
+    )
+
+
 class SearchAPIInput(BaseModel):
     """Input for searching Polars API."""
 
@@ -248,6 +267,60 @@ class GetDocstringInput(BaseModel):
 
 # MCP Tools
 @mcp.tool(
+    name="polars_get_guide",
+    annotations={
+        "title": "Get Polars Conceptual Guide",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def polars_get_guide(params: GetGuideInput) -> str:
+    """Get a conceptual guide about Polars usage patterns.
+
+    IMPORTANT: Use this tool FIRST for conceptual "how to" questions like:
+    - "how do I use contexts?" → use guide='contexts'
+    - "when should I use group_by?" → use guide='contexts'
+    - "what's the difference between select and with_columns?" → use guide='contexts'
+    - "how do expressions work?" → use guide='expressions'
+    - "should I use lazy or eager?" → use guide='lazy-api'
+
+    Only use the API search tools (polars_search_api, polars_get_docstring) after
+    checking the relevant guide, or when looking up specific function names.
+
+    Args:
+        params (GetGuideInput): Parameters containing:
+            - guide (str): Which guide to get - 'contexts', 'expressions', or 'lazy-api'
+
+    Returns:
+        str: Complete guide content in markdown format
+
+    Available Guides:
+        - contexts: Expression contexts (select, filter, group_by, with_columns, over)
+                   When to use each context, how they work, combining contexts
+        - expressions: Expression system and composition patterns
+                      What expressions are, chaining, operators, expansion
+        - lazy-api: Lazy evaluation and query optimization
+                   LazyFrame vs DataFrame, optimization patterns, best practices
+    """
+    try:
+        guide_files = {
+            GuideType.CONTEXTS: "contexts.md",
+            GuideType.EXPRESSIONS: "expressions.md",
+            GuideType.LAZY_API: "lazy-api.md",
+        }
+
+        filename = guide_files[params.guide]
+        content = load_guide(filename)
+
+        return content
+
+    except Exception as e:
+        return f"Error loading guide: {str(e)}"
+
+
+@mcp.tool(
     name="polars_search_api",
     annotations={
         "title": "Search Polars API",
@@ -259,6 +332,14 @@ class GetDocstringInput(BaseModel):
 )
 async def polars_search_api(params: SearchAPIInput) -> str:
     """Search the Polars API reference for functions, methods, and classes.
+
+    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
+    - Questions about contexts? → polars_get_guide(guide='contexts')
+    - Questions about expressions? → polars_get_guide(guide='expressions')
+    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
+
+    Only use this tool for looking up specific API function names or browsing
+    what methods are available.
 
     Searches through all public Polars API elements including DataFrame methods,
     LazyFrame methods, Series methods, expressions, and top-level functions.
@@ -334,6 +415,14 @@ async def polars_search_api(params: SearchAPIInput) -> str:
 async def polars_get_docstring(params: GetDocstringInput) -> str:
     """Get complete documentation for a specific Polars API element.
 
+    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
+    - Questions about contexts? → polars_get_guide(guide='contexts')
+    - Questions about expressions? → polars_get_guide(guide='expressions')
+    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
+
+    Only use this tool when you need the full docstring for a specific API element
+    that you already know the name of.
+
     Retrieves the full docstring, signature, and metadata for any public
     Polars function, method, or class.
 
@@ -368,25 +457,6 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
 
     except Exception as e:
         return f"Error retrieving documentation: {str(e)}"
-
-
-# MCP Resources - Conceptual guides
-@mcp.resource("polars://guide/lazy-api")
-async def lazy_api_guide() -> str:
-    """Complete guide to Polars lazy API and query optimization."""
-    return load_guide("lazy-api.md")
-
-
-@mcp.resource("polars://guide/expressions")
-async def expressions_guide() -> str:
-    """Guide to Polars expression system and composition patterns."""
-    return load_guide("expressions.md")
-
-
-@mcp.resource("polars://guide/contexts")
-async def contexts_guide() -> str:
-    """Guide to expression contexts (select, filter, group_by, with_columns)."""
-    return load_guide("contexts.md")
 
 
 if __name__ == "__main__":
