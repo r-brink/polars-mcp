@@ -45,7 +45,7 @@ Refer to the documentation on the Model Context Protocol website on how to [conn
 ```json
 {
     "mcpServers": {
-        "polars": {
+        "polars-mcp": {
             "command": "uv",
             "args": [
                 "--directory",
