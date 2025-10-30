@@ -356,7 +356,7 @@ class GetDocstringInput(BaseModel):
 @mcp.tool(
     name="polars_get_guide",
     annotations={
-        "title": "Get Polars Conceptual Guide",
+        "title": "Get Polars Concepts Guides",
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
