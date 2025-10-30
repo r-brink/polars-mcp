@@ -470,7 +470,9 @@ def format_search_results(
         "openWorldHint": False,
     },
 )
-async def polars_search_api(params: SearchAPIInput) -> str:
+async def polars_search_api(
+    query: str, limit: int = 20, response_format: str = "markdown"
+):
     """Search the Polars API reference for functions, methods, and classes.
 
     IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
@@ -486,31 +488,30 @@ async def polars_search_api(params: SearchAPIInput) -> str:
     LazyFrame methods, Series methods, expressions, and top-level functions.
 
     Args:
-        params (SearchAPIInput): Search parameters containing:
-            - query (str): Search term to match against API names and documentation
-            - limit (int): Maximum number of results to return (default 20)
-            - response_format (str): 'markdown' or 'json'
+        query (str): Search term to match against API names and documentation
+        limit (int): Maximum number of results to return (default 20)
+        response_format (str): 'markdown' or 'json'
 
     Returns:
         str: Search results in the specified format
     """
     try:
         # Perform the search
-        results = search_index(params.query, params.limit)
+        results = search_index(query, limit)
 
         # Handle no results
         if not results:
-            return f"No results found for query: '{params.query}'\n\nTry:\n- Using different search terms\n- Checking spelling\n- Using polars_get_guide for conceptual questions"
+            return f"No results found for query: '{query}'\n\nTry:\n- Using different search terms\n- Checking spelling\n- Using polars_get_guide for conceptual questions"
 
         # JSON format - always return full results
-        if params.response_format == ResponseFormat.JSON:
+        if response_format == "json":
             return json.dumps(
-                {"query": params.query, "count": len(results), "results": results},
+                {"query": query, "count": len(results), "results": results},
                 indent=2,
             )
 
         # Markdown format with size checking
-        result = format_search_results(params.query, results, is_truncated=False)
+        result = format_search_results(query, results, is_truncated=False)
 
         # Check if we exceed character limit
         if len(result) > CHARACTER_LIMIT:
@@ -521,7 +522,7 @@ async def polars_search_api(params: SearchAPIInput) -> str:
 
             # Rebuild with truncated results
             result = format_search_results(
-                params.query, results, total_count=original_count, is_truncated=True
+                query, results, total_count=original_count, is_truncated=True
             )
 
         return result
