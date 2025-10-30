@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import polars as pl
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,17 +41,52 @@ class ResponseFormat(str, Enum):
     JSON = "json"
 
 
+class GuideType(str, Enum):
+    """Available guide types."""
+
+    CONTEXTS = "contexts"
+    EXPRESSIONS = "expressions"
+    LAZY_API = "lazy-api"
+    PANDAS_TO_POLARS = "pandas-to-polars"
+
+
 # API Index - built on first access
 _api_index: Optional[Dict[str, Any]] = None
+
+
+def _create_test_instance(class_name: str, cls: type) -> Any:
+    """Create a minimal test instance for namespace inspection.
+
+    Args:
+        class_name: Name of the class ("Expr", "Series", etc.)
+        cls: The actual class object
+
+    Returns:
+        A minimal instance of the class, or None if creation fails
+    """
+    try:
+        if class_name == "Expr":
+            return pl.col("_")
+        elif class_name == "Series":
+            return pl.Series("_", [1])
+        elif class_name == "DataFrame":
+            return pl.DataFrame({"_": [1]})
+        elif class_name == "LazyFrame":
+            return pl.DataFrame({"_": [1]}).lazy()
+    except Exception:
+        return None
+
+    return None
 
 
 def build_api_index() -> Dict[str, Any]:
     """Build index of Polars API by introspecting the module.
 
+    Uses _accessors metadata + minimal test instances for namespace discovery.
+
     Returns:
         Dictionary mapping names to API metadata.
     """
-    import polars as pl
 
     index = {}
 
@@ -73,13 +109,22 @@ def build_api_index() -> Dict[str, Any]:
             "signature": "",
         }
 
+        # Get registered namespace accessors (Polars tracks all namespaces)
+        namespace_names = getattr(cls, "_accessors", set())
+
+        # Create a test instance once for this class (for namespace inspection)
+        test_instance = (
+            _create_test_instance(class_name, cls) if namespace_names else None
+        )
+
         # Add all public methods
         for method_name in dir(cls):
             if method_name.startswith("_"):
                 continue
 
             try:
-                method = getattr(cls, method_name)
+                # Use getattr_static to avoid triggering descriptors for regular methods
+                method = inspect.getattr_static(cls, method_name)
                 method_doc = inspect.getdoc(method)
 
                 # Try to get signature
@@ -97,6 +142,53 @@ def build_api_index() -> Dict[str, Any]:
                     "docstring": method_doc or "No documentation available",
                     "signature": sig_str,
                 }
+
+                # Check if this is a registered namespace accessor
+                if method_name in namespace_names and test_instance is not None:
+                    try:
+                        # Access the namespace property on the test instance
+                        namespace_obj = getattr(test_instance, method_name)
+                        namespace_class = type(namespace_obj)
+
+                        # Index all methods in the namespace class
+                        for ns_method_name in dir(namespace_class):
+                            if ns_method_name.startswith("_"):
+                                continue
+
+                            try:
+                                # Get the method from the namespace class
+                                ns_method = getattr(namespace_class, ns_method_name)
+
+                                # Only index callable methods
+                                if not callable(ns_method):
+                                    continue
+
+                                ns_doc = inspect.getdoc(ns_method)
+                                try:
+                                    ns_sig = inspect.signature(ns_method)
+                                    ns_sig_str = str(ns_sig)
+                                except (ValueError, TypeError):
+                                    ns_sig_str = "(...)"
+
+                                # Index with full dotted name: Class.namespace.method
+                                ns_full_name = (
+                                    f"{class_name}.{method_name}.{ns_method_name}"
+                                )
+                                index[ns_full_name] = {
+                                    "type": "namespace_method",
+                                    "class": class_name,
+                                    "namespace": method_name,
+                                    "full_name": f"polars.{ns_full_name}",
+                                    "docstring": ns_doc or "No documentation available",
+                                    "signature": ns_sig_str,
+                                }
+                            except (AttributeError, TypeError):
+                                # Skip methods that can't be introspected
+                                continue
+                    except Exception:
+                        # If namespace inspection fails, continue with other methods
+                        continue
+
             except (AttributeError, TypeError):
                 continue
 
@@ -203,12 +295,26 @@ def format_api_item_markdown(item: Dict[str, Any]) -> str:
     if item.get("class"):
         lines.append(f"\n**Class:** {item['class']}")
 
+    if item.get("namespace"):
+        lines.append(f"\n**Namespace:** {item['namespace']}")
+
     lines.append(f"\n### Documentation\n\n{item['docstring']}")
 
     return "\n".join(lines)
 
 
 # Tool Input Models
+class GetGuideInput(BaseModel):
+    """Input for getting a conceptual guide."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    guide: GuideType = Field(
+        ...,
+        description="Which guide to retrieve: 'contexts' for expression contexts, 'expressions' for expression patterns, 'lazy-api' for lazy evaluation, 'pandas-to-polars' for pandas to Polars migration",
+    )
+
+
 class SearchAPIInput(BaseModel):
     """Input for searching Polars API."""
 
@@ -248,6 +354,113 @@ class GetDocstringInput(BaseModel):
 
 # MCP Tools
 @mcp.tool(
+    name="polars_get_guide",
+    annotations={
+        "title": "Get Polars Conceptual Guide",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def polars_get_guide(params: GetGuideInput) -> str:
+    """Get a conceptual guide about Polars usage patterns.
+
+    IMPORTANT: Use this tool FIRST for conceptual "how to" questions like:
+    - "how do I use contexts?" → use guide='contexts'
+    - "when should I use group_by?" → use guide='contexts'
+    - "what's the difference between select and with_columns?" → use guide='contexts'
+    - "how do expressions work?" → use guide='expressions'
+    - "should I use lazy or eager?" → use guide='lazy-api'
+    - "how do I translate pandas code to Polars?" → use guide='pandas-to-polars'
+
+    Only use the API search tools (polars_search_api, polars_get_docstring) after
+    checking the relevant guide, or when looking up specific function names.
+
+    Args:
+        params (GetGuideInput): Parameters containing:
+            - guide (str): Which guide to get - 'contexts', 'expressions', 'lazy-api', or 'pandas-to-polars'
+
+    Returns:
+        str: Complete guide content in markdown format
+
+    Available Guides:
+        - contexts: Expression contexts (select, filter, group_by, with_columns, over)
+                   When to use each context, how they work, combining contexts
+        - expressions: Expression system and composition patterns
+                      What expressions are, chaining, operators, expansion
+        - lazy-api: Lazy evaluation and query optimization
+                   LazyFrame vs DataFrame, optimization patterns, best practices
+        - pandas-to-polars: Complete pandas to Polars translation guide
+                         Side-by-side comparisons, common patterns, anti-patterns
+    """
+    try:
+        guide_files = {
+            GuideType.CONTEXTS: "contexts.md",
+            GuideType.EXPRESSIONS: "expressions.md",
+            GuideType.LAZY_API: "lazy-api.md",
+            GuideType.PANDAS_TO_POLARS: "pandas-to-polars.md",
+        }
+
+        filename = guide_files[params.guide]
+        content = load_guide(filename)
+
+        return content
+
+    except Exception as e:
+        return f"Error loading guide: {str(e)}"
+
+
+def format_search_results(
+    query: str,
+    results: List[Dict[str, Any]],
+    total_count: Optional[int] = None,
+    is_truncated: bool = False,
+) -> str:
+    """Format search results as markdown.
+
+    Args:
+        query: The search query
+        results: List of matching API items
+        total_count: Total number of matches before truncation (optional)
+        is_truncated: Whether results were truncated due to size
+
+    Returns:
+        Formatted markdown string
+    """
+    lines = [f"# Search Results for '{query}'\n"]
+
+    if is_truncated and total_count:
+        lines.append(
+            f"Showing {len(results)} of {total_count} results (truncated due to size):\n"
+        )
+    else:
+        lines.append(f"Found {len(results)} results:\n")
+
+    for i, item in enumerate(results, 1):
+        lines.append(f"### {i}. {item['full_name']}")
+        lines.append(f"**Type:** {item['type']}")
+
+        # Show truncated docstring
+        doc = item["docstring"]
+        if len(doc) > 200:
+            doc = doc[:200] + "..."
+        lines.append(f"{doc}\n")
+
+    lines.append(
+        "\n*Use `polars_get_docstring` with the full name to see complete documentation.*"
+    )
+
+    if is_truncated:
+        lines.append(
+            "\n*Note: Results were truncated to fit size limits. "
+            "Try a more specific query or use fewer results.*"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
     name="polars_search_api",
     annotations={
         "title": "Search Polars API",
@@ -259,6 +472,15 @@ class GetDocstringInput(BaseModel):
 )
 async def polars_search_api(params: SearchAPIInput) -> str:
     """Search the Polars API reference for functions, methods, and classes.
+
+    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
+    - Questions about contexts? → polars_get_guide(guide='contexts')
+    - Questions about expressions? → polars_get_guide(guide='expressions')
+    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
+    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+
+    Only use this tool for looking up specific API function names or browsing
+    what methods are available.
 
     Searches through all public Polars API elements including DataFrame methods,
     LazyFrame methods, Series methods, expressions, and top-level functions.
@@ -273,49 +495,36 @@ async def polars_search_api(params: SearchAPIInput) -> str:
         str: Search results in the specified format
     """
     try:
+        # Perform the search
         results = search_index(params.query, params.limit)
 
+        # Handle no results
         if not results:
-            return f"No results found for query: {params.query}"
+            return f"No results found for query: '{params.query}'\n\nTry:\n- Using different search terms\n- Checking spelling\n- Using polars_get_guide for conceptual questions"
 
+        # JSON format - always return full results
         if params.response_format == ResponseFormat.JSON:
             return json.dumps(
                 {"query": params.query, "count": len(results), "results": results},
                 indent=2,
             )
-        else:
-            # Markdown format
-            lines = [f"# Search Results for '{params.query}'\n"]
-            lines.append(f"Found {len(results)} results:\n")
 
-            for i, item in enumerate(results, 1):
-                lines.append(f"### {i}. {item['full_name']}")
-                lines.append(f"**Type:** {item['type']}")
+        # Markdown format with size checking
+        result = format_search_results(params.query, results, is_truncated=False)
 
-                # Show truncated docstring
-                doc = item["docstring"]
-                if len(doc) > 200:
-                    doc = doc[:200] + "..."
-                lines.append(f"{doc}\n")
+        # Check if we exceed character limit
+        if len(result) > CHARACTER_LIMIT:
+            # Truncate results to approximately half
+            original_count = len(results)
+            truncated_count = max(1, len(results) // 2)  # Keep at least 1 result
+            results = results[:truncated_count]
 
-            lines.append(
-                "\n*Use `polars_get_docstring` with the full name to see complete documentation.*"
+            # Rebuild with truncated results
+            result = format_search_results(
+                params.query, results, total_count=original_count, is_truncated=True
             )
 
-            result = "\n".join(lines)
-
-            # Check character limit
-            if len(result) > CHARACTER_LIMIT:
-                truncated_results = results[: len(results) // 2]
-                return polars_search_api(
-                    SearchAPIInput(
-                        query=params.query,
-                        limit=len(truncated_results),
-                        response_format=params.response_format,
-                    )
-                )
-
-            return result
+        return result
 
     except Exception as e:
         return f"Error searching API: {str(e)}"
@@ -333,6 +542,15 @@ async def polars_search_api(params: SearchAPIInput) -> str:
 )
 async def polars_get_docstring(params: GetDocstringInput) -> str:
     """Get complete documentation for a specific Polars API element.
+
+    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
+    - Questions about contexts? → polars_get_guide(guide='contexts')
+    - Questions about expressions? → polars_get_guide(guide='expressions')
+    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
+    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+
+    Only use this tool when you need the full docstring for a specific API element
+    that you already know the name of.
 
     Retrieves the full docstring, signature, and metadata for any public
     Polars function, method, or class.
@@ -368,25 +586,6 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
 
     except Exception as e:
         return f"Error retrieving documentation: {str(e)}"
-
-
-# MCP Resources - Conceptual guides
-@mcp.resource("polars://guide/lazy-api")
-async def lazy_api_guide() -> str:
-    """Complete guide to Polars lazy API and query optimization."""
-    return load_guide("lazy-api.md")
-
-
-@mcp.resource("polars://guide/expressions")
-async def expressions_guide() -> str:
-    """Guide to Polars expression system and composition patterns."""
-    return load_guide("expressions.md")
-
-
-@mcp.resource("polars://guide/contexts")
-async def contexts_guide() -> str:
-    """Guide to expression contexts (select, filter, group_by, with_columns)."""
-    return load_guide("contexts.md")
 
 
 if __name__ == "__main__":
