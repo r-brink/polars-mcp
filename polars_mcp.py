@@ -589,5 +589,9 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
         return f"Error retrieving documentation: {str(e)}"
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
