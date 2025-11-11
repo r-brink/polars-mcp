@@ -16,3 +16,16 @@ polars-mcp = "polars_mcp:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["polars_mcp.py"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"guides" = "guides"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "polars_mcp.py",
+    "guides/",
+    "README.md",
+]
