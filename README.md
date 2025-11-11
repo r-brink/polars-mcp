@@ -13,7 +13,19 @@ MCP server providing Polars API reference documentation via introspection of the
 
 ## Installation
 
-Requires Python 3.10+ and uv.
+**Important:** This server introspects the installed Polars package. Install the same Polars version you use in your project to ensure accurate documentation.
+
+### From PyPI
+
+```bash
+# Or install with latest Polars
+uv pip install polars-mcp polars
+
+# Install with your project's Polars version
+uv pip install polars-mcp polars==1.35.0
+```
+
+### From source
 
 ```bash
 # Clone repository
@@ -24,23 +36,28 @@ cd polars-mcp
 uv pip install .
 ```
 
-## Project Structure
-
-```
-polars-mcp/
-├── polars_mcp.py              # Main server implementation
-├── pyproject.toml             # Dependencies
-├── guides/                    # Conceptual documentation
-│   ├── lazy-api.md           # Lazy API guide
-│   ├── expressions.md        # Expression patterns
-│   ├── contexts.md           # Context behaviors
-│   └── pandas-to-polars.md   # pandas to Polars translation guide
-└── README.md
-```
-
 ## Usage
 
-Refer to the documentation on the Model Context Protocol website on how to [connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers) for an extensive guide.
+Add to your MCP settings configuration file.
+
+### With `uvx`
+
+```json
+{
+    "mcpServers": {
+        "polars-mcp": {
+            "command": "uvx",
+            "args": [
+                "--with",
+                "polars", # set your Polars version here
+                "polars-mcp"
+            ]
+        }
+    }
+}
+```
+
+### When installing from source
 
 ```json
 {
@@ -57,6 +74,8 @@ Refer to the documentation on the Model Context Protocol website on how to [conn
     }
 }
 ```
+
+Refer to the documentation on the Model Context Protocol website on how to [connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers) for an extensive guide.
 
 ### Standalone Testing
 
@@ -171,6 +190,20 @@ This guide is specifically optimized for LLMs to quickly translate pandas code t
 - **Comprehensive**: Combines API reference with conceptual guides
 - **Migration-friendly**: Includes complete pandas translation guide
 - **Fast**: Uses introspection for instant access to documentation
+
+## Project Structure
+
+```
+polars-mcp/
+├── polars_mcp.py              # Main server
+├── pyproject.toml             # Dependencies
+├── guides/                    # Conceptual
+│   ├── lazy-api.md           # Lazy API guide
+│   ├── expressions.md        # Expression patterns
+│   ├── contexts.md           # Context behaviors
+│   └── pandas-to-polars.md   # pandas to Polars
+└── README.md
+```
 
 ## Contributing
 
