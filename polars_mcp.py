@@ -366,16 +366,13 @@ class GetDocstringInput(BaseModel):
 async def polars_get_guide(params: GetGuideInput) -> str:
     """Get a conceptual guide about Polars usage patterns.
 
-    IMPORTANT: Use this tool FIRST for conceptual "how to" questions like:
-    - "how do I use contexts?" → use guide='contexts'
-    - "when should I use group_by?" → use guide='contexts'
-    - "what's the difference between select and with_columns?" → use guide='contexts'
-    - "how do expressions work?" → use guide='expressions'
-    - "should I use lazy or eager?" → use guide='lazy-api'
-    - "how do I translate pandas code to Polars?" → use guide='pandas-to-polars'
+    For conceptual "how to" questions, combine this with polars_search_api to get both:
+    - Conceptual understanding (from the guide)
+    - Concrete available functions (from API search)
 
-    Only use the API search tools (polars_search_api, polars_get_docstring) after
-    checking the relevant guide, or when looking up specific function names.
+    Example: For "how do I filter data?", use BOTH:
+    - polars_get_guide(guide='contexts') for filtering concepts
+    - polars_search_api(query='filter') for specific filter methods
 
     Args:
         params (GetGuideInput): Parameters containing:
@@ -473,16 +470,13 @@ def format_search_results(
 async def polars_search_api(
     query: str, limit: int = 20, response_format: str = "markdown"
 ):
-    """Search the Polars API reference for functions, methods, and classes.
+    """Search the Polars API for functions, methods, and classes.
 
-    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
-    - Questions about contexts? → polars_get_guide(guide='contexts')
-    - Questions about expressions? → polars_get_guide(guide='expressions')
-    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
-    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+    For conceptual questions, combine this with polars_get_guide to get both:
+    - Available functions and their signatures (from this search)
+    - Conceptual understanding of when/how to use them (from guides)
 
-    Only use this tool for looking up specific API function names or browsing
-    what methods are available.
+    For specific API lookup (e.g., "what parameters does filter take?"), you can use this alone or follow up with polars_get_docstring.
 
     Searches through all public Polars API elements including DataFrame methods,
     LazyFrame methods, Series methods, expressions, and top-level functions.
@@ -544,14 +538,10 @@ async def polars_search_api(
 async def polars_get_docstring(params: GetDocstringInput) -> str:
     """Get complete documentation for a specific Polars API element.
 
-    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
-    - Questions about contexts? → polars_get_guide(guide='contexts')
-    - Questions about expressions? → polars_get_guide(guide='expressions')
-    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
-    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+    Use this when you need the full docstring for a specific function/method you already know the name of.
 
-    Only use this tool when you need the full docstring for a specific API element
-    that you already know the name of.
+    For discovering what functions are available, use polars_search_api first.
+    For understanding concepts, combine polars_get_guide with polars_search_api.
 
     Retrieves the full docstring, signature, and metadata for any public
     Polars function, method, or class.
