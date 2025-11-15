@@ -240,6 +240,46 @@ def get_api_index() -> Dict[str, Any]:
     return _api_index
 
 
+def calculate_match_score(query: str, name: str, docstring: str) -> float:
+    """Score matches with namespace priority and prefix handling."""
+    q = query.lower().strip()
+
+    # Strip common import aliases
+    if q.startswith("pl."):
+        q = q[3:]
+    elif q.startswith("polars."):
+        q = q[7:]
+
+    n, d = name.lower(), docstring.lower()
+
+    # Namespace match
+    if f".{q}." in n or n.endswith(f".{q}"):
+        return 2.0
+
+    # Name matches with differentiation
+    if q in n:
+        score = 1.0
+
+        # Exact match bonus
+        if q == n:
+            score += 3.0  # Total: 4.0
+
+        # Starts with bonus
+        elif n.startswith(q):
+            score += 1.0  # Total: 2.0
+
+        # Coverage bonus (longer match = higher score)
+        score += len(q) / len(n)  # 0.0 to 1.0
+
+        return score
+
+    # Docstring match
+    if q in d:
+        return 0.5
+
+    return 0.0
+
+
 def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Search the API index for matching items.
 
@@ -253,33 +293,20 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """
     index = get_api_index()
 
-    # Split query into terms for OR logic
-    query_terms = [term.strip().lower() for term in query.split() if term.strip()]
+    results = [
+        {
+            "score": calculate_match_score(query, name, info["docstring"]),
+            "name": name,
+            **info,
+        }
+        for name, info in index.items()
+    ]
 
-    name_matches = []  # Matches in name (higher priority)
-    doc_matches = []  # Matches only in docstring (lower priority)
-    seen = set()  # Track which items we've already added
+    results = [r for r in results if r["score"] > 0]
+    results.sort(
+        key=lambda x: (-x["score"], x["name"])
+    )  # Score desc, then alphabetical
 
-    for name, info in index.items():
-        name_lower = name.lower()
-        doc_lower = info["docstring"].lower()
-
-        # Check if any query term matches
-        for term in query_terms:
-            if name not in seen:
-                if term in name_lower:
-                    # Name match - high priority
-                    name_matches.append({"name": name, **info})
-                    seen.add(name)
-                    break
-                elif term in doc_lower:
-                    # Docstring match - lower priority
-                    doc_matches.append({"name": name, **info})
-                    seen.add(name)
-                    break
-
-    # Combine results: name matches first, then doc matches
-    results = name_matches + doc_matches
     return results[:limit]
 
 
