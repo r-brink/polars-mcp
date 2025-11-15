@@ -240,6 +240,46 @@ def get_api_index() -> Dict[str, Any]:
     return _api_index
 
 
+def calculate_match_score(query: str, name: str, docstring: str) -> float:
+    """Score matches with namespace priority and prefix handling."""
+    q = query.lower().strip()
+
+    # Strip common import aliases
+    if q.startswith("pl."):
+        q = q[3:]
+    elif q.startswith("polars."):
+        q = q[7:]
+
+    n, d = name.lower(), docstring.lower()
+
+    # Namespace match
+    if f".{q}." in n or n.endswith(f".{q}"):
+        return 2.0
+
+    # Name matches with differentiation
+    if q in n:
+        score = 1.0
+
+        # Exact match bonus
+        if q == n:
+            score += 3.0  # Total: 4.0
+
+        # Starts with bonus
+        elif n.startswith(q):
+            score += 1.0  # Total: 2.0
+
+        # Coverage bonus (longer match = higher score)
+        score += len(q) / len(n)  # 0.0 to 1.0
+
+        return score
+
+    # Docstring match
+    if q in d:
+        return 0.5
+
+    return 0.0
+
+
 def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Search the API index for matching items.
 
@@ -253,33 +293,20 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """
     index = get_api_index()
 
-    # Split query into terms for OR logic
-    query_terms = [term.strip().lower() for term in query.split() if term.strip()]
+    results = [
+        {
+            "score": calculate_match_score(query, name, info["docstring"]),
+            "name": name,
+            **info,
+        }
+        for name, info in index.items()
+    ]
 
-    name_matches = []  # Matches in name (higher priority)
-    doc_matches = []  # Matches only in docstring (lower priority)
-    seen = set()  # Track which items we've already added
+    results = [r for r in results if r["score"] > 0]
+    results.sort(
+        key=lambda x: (-x["score"], x["name"])
+    )  # Score desc, then alphabetical
 
-    for name, info in index.items():
-        name_lower = name.lower()
-        doc_lower = info["docstring"].lower()
-
-        # Check if any query term matches
-        for term in query_terms:
-            if name not in seen:
-                if term in name_lower:
-                    # Name match - high priority
-                    name_matches.append({"name": name, **info})
-                    seen.add(name)
-                    break
-                elif term in doc_lower:
-                    # Docstring match - lower priority
-                    doc_matches.append({"name": name, **info})
-                    seen.add(name)
-                    break
-
-    # Combine results: name matches first, then doc matches
-    results = name_matches + doc_matches
     return results[:limit]
 
 
@@ -366,16 +393,13 @@ class GetDocstringInput(BaseModel):
 async def polars_get_guide(params: GetGuideInput) -> str:
     """Get a conceptual guide about Polars usage patterns.
 
-    IMPORTANT: Use this tool FIRST for conceptual "how to" questions like:
-    - "how do I use contexts?" → use guide='contexts'
-    - "when should I use group_by?" → use guide='contexts'
-    - "what's the difference between select and with_columns?" → use guide='contexts'
-    - "how do expressions work?" → use guide='expressions'
-    - "should I use lazy or eager?" → use guide='lazy-api'
-    - "how do I translate pandas code to Polars?" → use guide='pandas-to-polars'
+    For conceptual "how to" questions, combine this with polars_search_api to get both:
+    - Conceptual understanding (from the guide)
+    - Concrete available functions (from API search)
 
-    Only use the API search tools (polars_search_api, polars_get_docstring) after
-    checking the relevant guide, or when looking up specific function names.
+    Example: For "how do I filter data?", use BOTH:
+    - polars_get_guide(guide='contexts') for filtering concepts
+    - polars_search_api(query='filter') for specific filter methods
 
     Args:
         params (GetGuideInput): Parameters containing:
@@ -473,16 +497,13 @@ def format_search_results(
 async def polars_search_api(
     query: str, limit: int = 20, response_format: str = "markdown"
 ):
-    """Search the Polars API reference for functions, methods, and classes.
+    """Search the Polars API for functions, methods, and classes.
 
-    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
-    - Questions about contexts? → polars_get_guide(guide='contexts')
-    - Questions about expressions? → polars_get_guide(guide='expressions')
-    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
-    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+    For conceptual questions, combine this with polars_get_guide to get both:
+    - Available functions and their signatures (from this search)
+    - Conceptual understanding of when/how to use them (from guides)
 
-    Only use this tool for looking up specific API function names or browsing
-    what methods are available.
+    For specific API lookup (e.g., "what parameters does filter take?"), you can use this alone or follow up with polars_get_docstring.
 
     Searches through all public Polars API elements including DataFrame methods,
     LazyFrame methods, Series methods, expressions, and top-level functions.
@@ -544,14 +565,10 @@ async def polars_search_api(
 async def polars_get_docstring(params: GetDocstringInput) -> str:
     """Get complete documentation for a specific Polars API element.
 
-    IMPORTANT: For conceptual "how to" questions, use polars_get_guide FIRST:
-    - Questions about contexts? → polars_get_guide(guide='contexts')
-    - Questions about expressions? → polars_get_guide(guide='expressions')
-    - Questions about lazy/eager? → polars_get_guide(guide='lazy-api')
-    - Questions about pandas translation? → polars_get_guide(guide='pandas-to-polars')
+    Use this when you need the full docstring for a specific function/method you already know the name of.
 
-    Only use this tool when you need the full docstring for a specific API element
-    that you already know the name of.
+    For discovering what functions are available, use polars_search_api first.
+    For understanding concepts, combine polars_get_guide with polars_search_api.
 
     Retrieves the full docstring, signature, and metadata for any public
     Polars function, method, or class.
