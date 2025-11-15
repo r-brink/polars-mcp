@@ -1,9 +1,3 @@
-"""Polars MCP Server - API Reference via Introspection
-
-A minimal MCP server that provides access to Polars API documentation
-by introspecting the installed Polars package.
-"""
-
 import inspect
 import json
 from enum import Enum

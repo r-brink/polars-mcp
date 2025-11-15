@@ -1,7 +1,7 @@
 [project]
 name = "polars-mcp"
-version = "0.1.1"
-description = "MCP server providing Polars API reference via introspection"
+version = "0.2.0"
+description = "MCP server providing Polars API reference and usage guides for efficient Polars query development"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
