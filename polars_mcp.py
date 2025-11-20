@@ -234,15 +234,22 @@ def get_api_index() -> Dict[str, Any]:
     return _api_index
 
 
+def normalize_api_name(name: str) -> str:
+    """Normalize API name by removing common prefixes and whitespace."""
+    name = name.strip()
+
+    # Check longer prefix first to avoid incorrect partial matches
+    if name.startswith("polars."):
+        return name[7:]
+    elif name.startswith("pl."):
+        return name[3:]
+
+    return name
+
+
 def calculate_match_score(query: str, name: str, docstring: str) -> float:
     """Score matches with namespace priority and prefix handling."""
-    q = query.lower().strip()
-
-    # Strip common import aliases
-    if q.startswith("pl."):
-        q = q[3:]
-    elif q.startswith("polars."):
-        q = q[7:]
+    q = normalize_api_name(query).lower()
 
     n, d = name.lower(), docstring.lower()
 
@@ -578,12 +585,14 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
     try:
         index = get_api_index()
 
+        name = normalize_api_name(params.name)
+
         # Try exact match first
-        if params.name in index:
-            item = {"name": params.name, **index[params.name]}
+        if name in index:
+            item = {"name": name, **index[name]}
         else:
             # Try case-insensitive match
-            name_lower = params.name.lower()
+            name_lower = name.lower()
             matches = [k for k in index.keys() if k.lower() == name_lower]
 
             if not matches:
