@@ -1,5 +1,6 @@
 import inspect
 import json
+import logging
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -252,22 +253,19 @@ def get_embedding_model() -> TextEmbedding:
 def get_search_index() -> Tuple[List[str], np.ndarray]:
     """Get or build the search index (keys and embeddings)."""
     global _search_keys, _search_embeddings
-    
+
     if _search_embeddings is None:
         index = get_api_index()
         model = get_embedding_model()
-        
+
         items = list(index.values())
         _search_keys = [item["full_name"] for item in items]
-        
-        documents = [
-            f"{item['full_name']}: {item['docstring']}" 
-            for item in items
-        ]
-        
+
+        documents = [f"{item['full_name']}: {item['docstring']}" for item in items]
+
         embeddings_list = list(model.embed(documents))
         _search_embeddings = np.array(embeddings_list)
-        
+
     return _search_keys, _search_embeddings
 
 
@@ -282,9 +280,6 @@ def normalize_api_name(name: str) -> str:
         return name[3:]
 
     return name
-
-
-
 
 
 def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -305,22 +300,22 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     scores = embeddings @ query_embedding
 
     top_indices = np.argsort(scores)[-limit:][::-1]
+    searchable_items = list(index.values())
 
     results = []
     for idx in top_indices:
         score = float(scores[idx])
         if score < MIN_RELEVANCE_SCORE:
             continue
-            
-        key = keys[idx]
-        item = next((i for i in index.values() if i["full_name"] == key), None)
-        
-        if item:
-            results.append({
+
+        item = searchable_items[idx]
+        results.append(
+            {
                 "score": score,
                 "name": item["full_name"],
                 **item,
-            })
+            }
+        )
 
     return results
 
@@ -624,6 +619,9 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
 
 
 def main():
+    logging.info("Loading Polars API index and embedding model...")
+    get_search_index()
+    logging.info("Model loaded. Starting MCP server...")
     mcp.run()
 
 
