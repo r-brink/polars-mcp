@@ -3,7 +3,7 @@ import json
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import polars as pl
 import numpy as np
@@ -49,10 +49,10 @@ class GuideType(str, Enum):
 
 
 # API Index - built on first access
-_api_index: Optional[Dict[str, Any]] = None
-_search_keys: Optional[List[str]] = None
-_search_embeddings: Optional[np.ndarray] = None
-_embedding_model: Optional[TextEmbedding] = None
+_api_index: dict[str, Any] | None = None
+_search_keys: list[str] | None = None
+_search_embeddings: np.ndarray | None = None
+_embedding_model: TextEmbedding | None = None
 
 
 def _create_test_instance(class_name: str, cls: type) -> Any:
@@ -80,7 +80,7 @@ def _create_test_instance(class_name: str, cls: type) -> Any:
     return None
 
 
-def build_api_index() -> Dict[str, Any]:
+def build_api_index() -> dict[str, Any]:
     """Build index of Polars API by introspecting the module.
 
     Uses _accessors metadata + minimal test instances for namespace discovery.
@@ -233,7 +233,7 @@ def build_api_index() -> Dict[str, Any]:
     return index
 
 
-def get_api_index() -> Dict[str, Any]:
+def get_api_index() -> dict[str, Any]:
     """Get or build the API index."""
     global _api_index
     if _api_index is None:
@@ -250,7 +250,7 @@ def get_embedding_model() -> TextEmbedding:
     return _embedding_model
 
 
-def get_search_index() -> Tuple[List[str], np.ndarray]:
+def get_search_index() -> tuple[list[str], np.ndarray]:
     """Get or build the search index (keys and embeddings)."""
     global _search_keys, _search_embeddings
 
@@ -282,7 +282,7 @@ def normalize_api_name(name: str) -> str:
     return name
 
 
-def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+def search_index(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Search the API index using vector similarity.
 
     Args:
@@ -320,7 +320,7 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     return results
 
 
-def format_api_item_markdown(item: Dict[str, Any]) -> str:
+def format_api_item_markdown(item: dict[str, Any]) -> str:
     """Format an API item as markdown."""
     lines = [f"## {item['full_name']}"]
 
@@ -447,8 +447,8 @@ async def polars_get_guide(params: GetGuideInput) -> str:
 
 def format_search_results(
     query: str,
-    results: List[Dict[str, Any]],
-    total_count: Optional[int] = None,
+    results: list[dict[str, Any]],
+    total_count: int | None = None,
     is_truncated: bool = False,
 ) -> str:
     """Format search results as markdown.
