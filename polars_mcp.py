@@ -1,10 +1,13 @@
 import inspect
 import json
+import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import polars as pl
+import numpy as np
+from fastembed import TextEmbedding
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +16,7 @@ mcp = FastMCP("polars_mcp")
 
 # Constants
 CHARACTER_LIMIT = 25000
+MIN_RELEVANCE_SCORE = 0.4
 GUIDES_DIR = Path(__file__).parent / "guides"
 
 
@@ -45,7 +49,10 @@ class GuideType(str, Enum):
 
 
 # API Index - built on first access
-_api_index: Optional[Dict[str, Any]] = None
+_api_index: dict[str, Any] | None = None
+_search_keys: list[str] | None = None
+_search_embeddings: np.ndarray | None = None
+_embedding_model: TextEmbedding | None = None
 
 
 def _create_test_instance(class_name: str, cls: type) -> Any:
@@ -73,7 +80,7 @@ def _create_test_instance(class_name: str, cls: type) -> Any:
     return None
 
 
-def build_api_index() -> Dict[str, Any]:
+def build_api_index() -> dict[str, Any]:
     """Build index of Polars API by introspecting the module.
 
     Uses _accessors metadata + minimal test instances for namespace discovery.
@@ -226,12 +233,40 @@ def build_api_index() -> Dict[str, Any]:
     return index
 
 
-def get_api_index() -> Dict[str, Any]:
+def get_api_index() -> dict[str, Any]:
     """Get or build the API index."""
     global _api_index
     if _api_index is None:
         _api_index = build_api_index()
     return _api_index
+
+
+def get_embedding_model() -> TextEmbedding:
+    """Get or initialize the embedding model."""
+    global _embedding_model
+    if _embedding_model is None:
+        # Use a lightweight, high-performance model
+        _embedding_model = TextEmbedding("BAAI/bge-small-en-v1.5")
+    return _embedding_model
+
+
+def get_search_index() -> tuple[list[str], np.ndarray]:
+    """Get or build the search index (keys and embeddings)."""
+    global _search_keys, _search_embeddings
+
+    if _search_embeddings is None:
+        index = get_api_index()
+        model = get_embedding_model()
+
+        items = list(index.values())
+        _search_keys = [item["full_name"] for item in items]
+
+        documents = [f"{item['full_name']}: {item['docstring']}" for item in items]
+
+        embeddings_list = list(model.embed(documents))
+        _search_embeddings = np.array(embeddings_list)
+
+    return _search_keys, _search_embeddings
 
 
 def normalize_api_name(name: str) -> str:
@@ -247,71 +282,45 @@ def normalize_api_name(name: str) -> str:
     return name
 
 
-def calculate_match_score(query: str, name: str, docstring: str) -> float:
-    """Score matches with namespace priority and prefix handling."""
-    q = normalize_api_name(query).lower()
-
-    n, d = name.lower(), docstring.lower()
-
-    # Namespace match
-    if f".{q}." in n or n.endswith(f".{q}"):
-        return 2.0
-
-    # Name matches with differentiation
-    if q in n:
-        score = 1.0
-
-        # Exact match bonus
-        if q == n:
-            score += 3.0  # Total: 4.0
-
-        # Starts with bonus
-        elif n.startswith(q):
-            score += 1.0  # Total: 2.0
-
-        # Coverage bonus (longer match = higher score)
-        score += len(q) / len(n)  # 0.0 to 1.0
-
-        return score
-
-    # Docstring match
-    if q in d:
-        return 0.5
-
-    return 0.0
-
-
-def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """Search the API index for matching items.
+def search_index(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Search the API index using vector similarity.
 
     Args:
-        query: Search query (matches against names and docstrings)
-               Can be multiple space-separated terms (OR logic)
+        query: Search query
         limit: Maximum number of results
 
     Returns:
-        List of matching API items, prioritizing name matches
+        List of matching API items, sorted by relevance
     """
     index = get_api_index()
+    keys, embeddings = get_search_index()
+    model = get_embedding_model()
 
-    results = [
-        {
-            "score": calculate_match_score(query, name, info["docstring"]),
-            "name": name,
-            **info,
-        }
-        for name, info in index.items()
-    ]
+    query_embedding = list(model.embed([query]))[0]
+    scores = embeddings @ query_embedding
 
-    results = [r for r in results if r["score"] > 0]
-    results.sort(
-        key=lambda x: (-x["score"], x["name"])
-    )  # Score desc, then alphabetical
+    top_indices = np.argsort(scores)[-limit:][::-1]
+    searchable_items = list(index.values())
 
-    return results[:limit]
+    results = []
+    for idx in top_indices:
+        score = float(scores[idx])
+        if score < MIN_RELEVANCE_SCORE:
+            continue
+
+        item = searchable_items[idx]
+        results.append(
+            {
+                "score": score,
+                "name": item["full_name"],
+                **item,
+            }
+        )
+
+    return results
 
 
-def format_api_item_markdown(item: Dict[str, Any]) -> str:
+def format_api_item_markdown(item: dict[str, Any]) -> str:
     """Format an API item as markdown."""
     lines = [f"## {item['full_name']}"]
 
@@ -438,8 +447,8 @@ async def polars_get_guide(params: GetGuideInput) -> str:
 
 def format_search_results(
     query: str,
-    results: List[Dict[str, Any]],
-    total_count: Optional[int] = None,
+    results: list[dict[str, Any]],
+    total_count: int | None = None,
     is_truncated: bool = False,
 ) -> str:
     """Format search results as markdown.
@@ -610,6 +619,9 @@ async def polars_get_docstring(params: GetDocstringInput) -> str:
 
 
 def main():
+    logging.info("Loading Polars API index and embedding model...")
+    get_search_index()
+    logging.info("Model loaded. Starting MCP server...")
     mcp.run()
 
 
