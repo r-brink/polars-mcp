@@ -1,12 +1,10 @@
 import inspect
 import json
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import polars as pl
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, ConfigDict, Field
 
 # Initialize MCP server
 mcp = FastMCP("polars_mcp")
@@ -14,6 +12,13 @@ mcp = FastMCP("polars_mcp")
 # Constants
 CHARACTER_LIMIT = 25000
 GUIDES_DIR = Path(__file__).parent / "guides"
+
+GUIDE_FILES = {
+    "contexts": "contexts.md",
+    "expressions": "expressions.md",
+    "lazy-api": "lazy-api.md",
+    "pandas-to-polars": "pandas-to-polars.md",
+}
 
 
 def load_guide(filename: str) -> str:
@@ -28,36 +33,13 @@ def load_guide(filename: str) -> str:
         return f"Error loading guide: {str(e)}"
 
 
-class ResponseFormat(str, Enum):
-    """Output format for tool responses."""
-
-    MARKDOWN = "markdown"
-    JSON = "json"
-
-
-class GuideType(str, Enum):
-    """Available guide types."""
-
-    CONTEXTS = "contexts"
-    EXPRESSIONS = "expressions"
-    LAZY_API = "lazy-api"
-    PANDAS_TO_POLARS = "pandas-to-polars"
-
-
 # API Index - built on first access
 _api_index: Optional[Dict[str, Any]] = None
+_namespace_registry: Optional[Dict[str, Dict[str, List[str]]]] = None
 
 
 def _create_test_instance(class_name: str, cls: type) -> Any:
-    """Create a minimal test instance for namespace inspection.
-
-    Args:
-        class_name: Name of the class ("Expr", "Series", etc.)
-        cls: The actual class object
-
-    Returns:
-        A minimal instance of the class, or None if creation fails
-    """
+    """Create a minimal test instance for namespace inspection."""
     try:
         if class_name == "Expr":
             return pl.col("_")
@@ -66,25 +48,31 @@ def _create_test_instance(class_name: str, cls: type) -> Any:
         elif class_name == "DataFrame":
             return pl.DataFrame({"_": [1]})
         elif class_name == "LazyFrame":
-            return pl.DataFrame({"_": [1]}).lazy()
+            return pl.LazyFrame({"_": [1]})
     except Exception:
         return None
-
     return None
 
 
-def build_api_index() -> Dict[str, Any]:
+def _extract_short_description(docstring: Optional[str]) -> str:
+    """Extract first sentence/line as short description."""
+    if not docstring:
+        return ""
+    first_line = docstring.split("\n")[0].strip()
+    if "." in first_line:
+        return first_line.split(".")[0] + "."
+    return first_line[:100] + ("..." if len(first_line) > 100 else "")
+
+
+def build_api_index() -> tuple[Dict[str, Any], Dict[str, Dict[str, List[str]]]]:
     """Build index of Polars API by introspecting the module.
 
-    Uses _accessors metadata + minimal test instances for namespace discovery.
-
     Returns:
-        Dictionary mapping names to API metadata.
+        Tuple of (api_index, namespace_registry)
     """
-
     index = {}
+    namespace_registry: Dict[str, Dict[str, List[str]]] = {}
 
-    # Main classes to document (with methods)
     main_classes = [
         ("DataFrame", pl.DataFrame),
         ("LazyFrame", pl.LazyFrame),
@@ -92,36 +80,33 @@ def build_api_index() -> Dict[str, Any]:
         ("Expr", pl.Expr),
     ]
 
-    # Index main classes and their methods
     for class_name, cls in main_classes:
-        # Add the class itself
+        namespace_registry[class_name] = {"_methods": []}
+
         doc = inspect.getdoc(cls)
         index[class_name] = {
             "type": "class",
+            "class": class_name,
+            "namespace": None,
             "full_name": f"polars.{class_name}",
             "docstring": doc or "No documentation available",
             "signature": "",
+            "short_description": _extract_short_description(doc),
         }
 
-        # Get registered namespace accessors (Polars tracks all namespaces)
         namespace_names = getattr(cls, "_accessors", set())
-
-        # Create a test instance once for this class (for namespace inspection)
         test_instance = (
             _create_test_instance(class_name, cls) if namespace_names else None
         )
 
-        # Add all public methods
         for method_name in dir(cls):
             if method_name.startswith("_"):
                 continue
 
             try:
-                # Use getattr_static to avoid triggering descriptors for regular methods
                 method = inspect.getattr_static(cls, method_name)
                 method_doc = inspect.getdoc(method)
 
-                # Try to get signature
                 try:
                     sig = inspect.signature(method)
                     sig_str = str(sig)
@@ -129,31 +114,31 @@ def build_api_index() -> Dict[str, Any]:
                     sig_str = "(...)"
 
                 full_name = f"{class_name}.{method_name}"
+                namespace_registry[class_name]["_methods"].append(method_name)
+
                 index[full_name] = {
                     "type": "method",
                     "class": class_name,
+                    "namespace": None,
                     "full_name": f"polars.{full_name}",
                     "docstring": method_doc or "No documentation available",
                     "signature": sig_str,
+                    "short_description": _extract_short_description(method_doc),
                 }
 
-                # Check if this is a registered namespace accessor
+                # Index namespace methods
                 if method_name in namespace_names and test_instance is not None:
                     try:
-                        # Access the namespace property on the test instance
                         namespace_obj = getattr(test_instance, method_name)
                         namespace_class = type(namespace_obj)
+                        namespace_registry[class_name][method_name] = []
 
-                        # Index all methods in the namespace class
                         for ns_method_name in dir(namespace_class):
                             if ns_method_name.startswith("_"):
                                 continue
 
                             try:
-                                # Get the method from the namespace class
                                 ns_method = getattr(namespace_class, ns_method_name)
-
-                                # Only index callable methods
                                 if not callable(ns_method):
                                     continue
 
@@ -164,10 +149,13 @@ def build_api_index() -> Dict[str, Any]:
                                 except (ValueError, TypeError):
                                     ns_sig_str = "(...)"
 
-                                # Index with full dotted name: Class.namespace.method
                                 ns_full_name = (
                                     f"{class_name}.{method_name}.{ns_method_name}"
                                 )
+                                namespace_registry[class_name][method_name].append(
+                                    ns_method_name
+                                )
+
                                 index[ns_full_name] = {
                                     "type": "namespace_method",
                                     "class": class_name,
@@ -175,438 +163,530 @@ def build_api_index() -> Dict[str, Any]:
                                     "full_name": f"polars.{ns_full_name}",
                                     "docstring": ns_doc or "No documentation available",
                                     "signature": ns_sig_str,
+                                    "short_description": _extract_short_description(
+                                        ns_doc
+                                    ),
                                 }
                             except (AttributeError, TypeError):
-                                # Skip methods that can't be introspected
                                 continue
                     except Exception:
-                        # If namespace inspection fails, continue with other methods
                         continue
 
             except (AttributeError, TypeError):
                 continue
 
-    # Index top-level functions and classes
+    # Index top-level functions
+    namespace_registry["functions"] = {"_methods": []}
+
     for name in dir(pl):
         if name.startswith("_"):
             continue
 
         obj = getattr(pl, name)
 
-        # Skip classes we already indexed with methods
         if inspect.isclass(obj) and name in [c[0] for c in main_classes]:
             continue
 
-        # Add other classes
         if inspect.isclass(obj):
             doc = inspect.getdoc(obj)
             index[name] = {
                 "type": "class",
+                "class": None,
+                "namespace": None,
                 "full_name": f"polars.{name}",
                 "docstring": doc or "No documentation available",
                 "signature": "",
+                "short_description": _extract_short_description(doc),
             }
-        # Add functions
         elif callable(obj):
             doc = inspect.getdoc(obj)
-
             try:
                 sig = inspect.signature(obj)
                 sig_str = str(sig)
             except (ValueError, TypeError):
                 sig_str = "(...)"
 
+            namespace_registry["functions"]["_methods"].append(name)
+
             index[name] = {
                 "type": "function",
+                "class": None,
+                "namespace": None,
                 "full_name": f"polars.{name}",
                 "docstring": doc or "No documentation available",
                 "signature": sig_str,
+                "short_description": _extract_short_description(doc),
             }
 
-    return index
+    return index, namespace_registry
 
 
 def get_api_index() -> Dict[str, Any]:
     """Get or build the API index."""
-    global _api_index
+    global _api_index, _namespace_registry
     if _api_index is None:
-        _api_index = build_api_index()
+        _api_index, _namespace_registry = build_api_index()
     return _api_index
 
 
-def normalize_api_name(name: str) -> str:
-    """Normalize API name by removing common prefixes and whitespace."""
-    name = name.strip()
+def get_namespace_registry() -> Dict[str, Dict[str, List[str]]]:
+    """Get or build the namespace registry."""
+    global _api_index, _namespace_registry
+    if _namespace_registry is None:
+        _api_index, _namespace_registry = build_api_index()
+    return _namespace_registry
 
-    # Check longer prefix first to avoid incorrect partial matches
+
+def normalize_api_name(name: str) -> str:
+    """Normalize API name by removing common prefixes."""
+    name = name.strip()
     if name.startswith("polars."):
         return name[7:]
     elif name.startswith("pl."):
         return name[3:]
-
     return name
 
 
-def calculate_match_score(query: str, name: str, docstring: str) -> float:
-    """Score matches with namespace priority and prefix handling."""
-    q = normalize_api_name(query).lower()
+def calculate_match_score(
+    term: str, name: str, docstring: str, short_desc: str
+) -> float:
+    """Score a single search term against an API item."""
+    t = normalize_api_name(term).lower()
+    n, d, s = name.lower(), docstring.lower(), short_desc.lower()
 
-    n, d = name.lower(), docstring.lower()
+    # Exact name match (highest priority)
+    if t == n or n.endswith(f".{t}"):
+        return 5.0
 
-    # Namespace match
-    if f".{q}." in n or n.endswith(f".{q}"):
-        return 2.0
+    # Namespace match (Class.namespace.query)
+    if f".{t}." in n:
+        return 3.0
 
-    # Name matches with differentiation
-    if q in n:
-        score = 1.0
-
-        # Exact match bonus
-        if q == n:
-            score += 3.0  # Total: 4.0
-
-        # Starts with bonus
-        elif n.startswith(q):
-            score += 1.0  # Total: 2.0
-
-        # Coverage bonus (longer match = higher score)
-        score += len(q) / len(n)  # 0.0 to 1.0
-
+    # Name contains term
+    if t in n:
+        score = 2.0
+        if n.startswith(t):
+            score += 0.5
+        score += len(t) / len(n)
         return score
 
-    # Docstring match
-    if q in d:
+    # Short description match
+    if t in s:
+        return 1.5
+
+    # Full docstring match
+    if t in d:
         return 0.5
 
     return 0.0
 
 
-def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """Search the API index for matching items.
+def search_index(
+    query: str,
+    limit: int = 20,
+    class_filter: Optional[str] = None,
+    namespace_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search the API index with optional filters.
 
-    Args:
-        query: Search query (matches against names and docstrings)
-               Can be multiple space-separated terms (OR logic)
-        limit: Maximum number of results
-
-    Returns:
-        List of matching API items, prioritizing name matches
+    Supports multi-word queries (OR logic - matches any term).
     """
     index = get_api_index()
 
-    results = [
-        {
-            "score": calculate_match_score(query, name, info["docstring"]),
-            "name": name,
-            **info,
-        }
-        for name, info in index.items()
-    ]
+    # Split query into terms for multi-word search
+    terms = [t.strip() for t in query.lower().replace(",", " ").split() if t.strip()]
 
-    results = [r for r in results if r["score"] > 0]
-    results.sort(
-        key=lambda x: (-x["score"], x["name"])
-    )  # Score desc, then alphabetical
+    if not terms:
+        return []
 
+    results = []
+    for name, info in index.items():
+        # Apply class filter
+        if class_filter and info.get("class") != class_filter:
+            continue
+
+        # Apply namespace filter
+        if namespace_filter and info.get("namespace") != namespace_filter:
+            continue
+
+        # Score each term and sum (OR logic)
+        total_score = 0.0
+        for term in terms:
+            total_score += calculate_match_score(
+                term, name, info["docstring"], info.get("short_description", "")
+            )
+
+        if total_score > 0:
+            results.append({"score": total_score, "name": name, **info})
+
+    results.sort(key=lambda x: (-x["score"], x["name"]))
     return results[:limit]
 
 
-def format_api_item_markdown(item: Dict[str, Any]) -> str:
-    """Format an API item as markdown."""
-    lines = [f"## {item['full_name']}"]
+def group_search_results(
+    results: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Group search results by class and namespace."""
+    groups: Dict[str, List[Dict[str, Any]]] = {
+        "functions": [],
+        "DataFrame": [],
+        "LazyFrame": [],
+        "Expr": [],
+        "Series": [],
+        "other": [],
+    }
 
-    lines.append(f"\n**Type:** {item['type']}")
+    expr_namespaces: Dict[str, List[Dict[str, Any]]] = {}
 
-    if item["signature"]:
-        lines.append(f"\n**Signature:** `{item['signature']}`")
+    for item in results:
+        item_class = item.get("class")
+        namespace = item.get("namespace")
 
-    if item.get("class"):
-        lines.append(f"\n**Class:** {item['class']}")
+        if item["type"] == "function":
+            groups["functions"].append(item)
+        elif item_class == "Expr" and namespace:
+            if namespace not in expr_namespaces:
+                expr_namespaces[namespace] = []
+            expr_namespaces[namespace].append(item)
+        elif item_class in groups:
+            groups[item_class].append(item)
+        else:
+            groups["other"].append(item)
 
-    if item.get("namespace"):
-        lines.append(f"\n**Namespace:** {item['namespace']}")
+    for ns_name, ns_items in sorted(expr_namespaces.items()):
+        groups[f"Expr.{ns_name}"] = ns_items
 
-    lines.append(f"\n### Documentation\n\n{item['docstring']}")
+    return {k: v for k, v in groups.items() if v}
+
+
+def format_grouped_results(
+    query: str, grouped: Dict[str, List[Dict[str, Any]]], total: int
+) -> str:
+    """Format grouped search results as markdown."""
+    lines = [f"# Search Results for '{query}'\n"]
+    lines.append(f"Found {total} results:\n")
+
+    order = ["functions", "DataFrame", "LazyFrame", "Series", "Expr"]
+
+    def sort_key(group_name: str) -> tuple:
+        if group_name in order:
+            return (0, order.index(group_name))
+        elif group_name.startswith("Expr."):
+            return (1, group_name)
+        else:
+            return (2, group_name)
+
+    for group_name in sorted(grouped.keys(), key=sort_key):
+        items = grouped[group_name]
+
+        if group_name == "functions":
+            lines.append("## Top-level Functions\n")
+        elif group_name.startswith("Expr."):
+            lines.append(f"## {group_name} (Expression Namespace)\n")
+        else:
+            lines.append(f"## {group_name} Methods\n")
+
+        for item in items:
+            sig = item.get("signature", "")
+            short_desc = item.get("short_description", "")
+
+            if sig and sig != "(...)":
+                sig_preview = sig if len(sig) < 60 else sig[:57] + "..."
+                lines.append(f"- **{item['name']}**`{sig_preview}`")
+            else:
+                lines.append(f"- **{item['name']}**")
+
+            if short_desc:
+                lines.append(f"  {short_desc}")
+
+        lines.append("")
+
+    lines.append("---")
+    lines.append("*Use `polars_get_docstring(name)` for full documentation.*")
+    lines.append(
+        "*Use `polars_browse(category)` to explore all methods in a class/namespace.*"
+    )
 
     return "\n".join(lines)
 
 
-# Tool Input Models
-class GetGuideInput(BaseModel):
-    """Input for getting a conceptual guide."""
+def find_related_methods(name: str, index: Dict[str, Any]) -> List[str]:
+    """Find methods related to the given one."""
+    related = []
+    info = index.get(name)
+    if not info:
+        return related
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    item_class = info.get("class")
+    namespace = info.get("namespace")
+    method_name = name.split(".")[-1]
 
-    guide: GuideType = Field(
-        ...,
-        description="Which guide to retrieve: 'contexts' for expression contexts, 'expressions' for expression patterns, 'lazy-api' for lazy evaluation, 'pandas-to-polars' for pandas to Polars migration",
-    )
+    for cls in ["DataFrame", "LazyFrame", "Expr", "Series"]:
+        if cls != item_class:
+            candidate = f"{cls}.{method_name}"
+            if candidate in index:
+                related.append(candidate)
+            if namespace:
+                candidate = f"{cls}.{namespace}.{method_name}"
+                if candidate in index:
+                    related.append(candidate)
 
+    if namespace and item_class:
+        prefix = f"{item_class}.{namespace}."
+        siblings = [k for k in index.keys() if k.startswith(prefix) and k != name]
+        related.extend(siblings[:5])
 
-class SearchAPIInput(BaseModel):
-    """Input for searching Polars API."""
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    query: str = Field(
-        ...,
-        description="Search query to find API functions, methods, or classes. Can include multiple space-separated terms (e.g., 'Int32 Float64', 'filter select')",
-        min_length=1,
-        max_length=100,
-    )
-    limit: int = Field(
-        default=20, description="Maximum number of results to return", ge=1, le=100
-    )
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.MARKDOWN,
-        description="Output format: 'markdown' for human-readable or 'json' for machine-readable",
-    )
+    return related[:8]
 
 
-class GetDocstringInput(BaseModel):
-    """Input for getting full documentation."""
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    name: str = Field(
-        ...,
-        description="Full name of API element (e.g., 'DataFrame.filter', 'col', 'LazyFrame')",
-        min_length=1,
-        max_length=200,
-    )
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.MARKDOWN,
-        description="Output format: 'markdown' for human-readable or 'json' for machine-readable",
-    )
-
-
-# MCP Tools
 @mcp.tool(
     name="polars_get_guide",
-    annotations={
-        "title": "Get Polars Concepts Guides",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
+    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
-async def polars_get_guide(params: GetGuideInput) -> str:
+async def polars_get_guide(guide: str) -> str:
     """Get a conceptual guide about Polars usage patterns.
 
-    For conceptual "how to" questions, combine this with polars_search_api to get both:
-    - Conceptual understanding (from the guide)
-    - Concrete available functions (from API search)
-
-    Example: For "how do I filter data?", use BOTH:
-    - polars_get_guide(guide='contexts') for filtering concepts
-    - polars_search_api(query='filter') for specific filter methods
+    Available guides:
+    - contexts: Expression contexts (select, filter, group_by, with_columns, over)
+    - expressions: Expression system and composition patterns
+    - lazy-api: Lazy evaluation and query optimization
+    - pandas-to-polars: pandas to Polars translation guide
 
     Args:
-        params (GetGuideInput): Parameters containing:
-            - guide (str): Which guide to get - 'contexts', 'expressions', 'lazy-api', or 'pandas-to-polars'
-
-    Returns:
-        str: Complete guide content in markdown format
-
-    Available Guides:
-        - contexts: Expression contexts (select, filter, group_by, with_columns, over)
-                   When to use each context, how they work, combining contexts
-        - expressions: Expression system and composition patterns
-                      What expressions are, chaining, operators, expansion
-        - lazy-api: Lazy evaluation and query optimization
-                   LazyFrame vs DataFrame, optimization patterns, best practices
-        - pandas-to-polars: Complete pandas to Polars translation guide
-                         Side-by-side comparisons, common patterns, anti-patterns
+        guide: Which guide to retrieve: 'contexts', 'expressions', 'lazy-api', or 'pandas-to-polars'
     """
-    try:
-        guide_files = {
-            GuideType.CONTEXTS: "contexts.md",
-            GuideType.EXPRESSIONS: "expressions.md",
-            GuideType.LAZY_API: "lazy-api.md",
-            GuideType.PANDAS_TO_POLARS: "pandas-to-polars.md",
-        }
-
-        filename = guide_files[params.guide]
-        content = load_guide(filename)
-
-        return content
-
-    except Exception as e:
-        return f"Error loading guide: {str(e)}"
-
-
-def format_search_results(
-    query: str,
-    results: List[Dict[str, Any]],
-    total_count: Optional[int] = None,
-    is_truncated: bool = False,
-) -> str:
-    """Format search results as markdown.
-
-    Args:
-        query: The search query
-        results: List of matching API items
-        total_count: Total number of matches before truncation (optional)
-        is_truncated: Whether results were truncated due to size
-
-    Returns:
-        Formatted markdown string
-    """
-    lines = [f"# Search Results for '{query}'\n"]
-
-    if is_truncated and total_count:
-        lines.append(
-            f"Showing {len(results)} of {total_count} results (truncated due to size):\n"
-        )
-    else:
-        lines.append(f"Found {len(results)} results:\n")
-
-    for i, item in enumerate(results, 1):
-        lines.append(f"### {i}. {item['full_name']}")
-        lines.append(f"**Type:** {item['type']}")
-
-        # Show truncated docstring
-        doc = item["docstring"]
-        if len(doc) > 200:
-            doc = doc[:200] + "..."
-        lines.append(f"{doc}\n")
-
-    lines.append(
-        "\n*Use `polars_get_docstring` with the full name to see complete documentation.*"
-    )
-
-    if is_truncated:
-        lines.append(
-            "\n*Note: Results were truncated to fit size limits. "
-            "Try a more specific query or use fewer results.*"
-        )
-
-    return "\n".join(lines)
+    if guide not in GUIDE_FILES:
+        available = ", ".join(GUIDE_FILES.keys())
+        return f"Unknown guide: '{guide}'\n\nAvailable guides: {available}"
+    return load_guide(GUIDE_FILES[guide])
 
 
 @mcp.tool(
     name="polars_search_api",
-    annotations={
-        "title": "Search Polars API",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
+    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def polars_search_api(
-    query: str, limit: int = 20, response_format: str = "markdown"
-):
+    query: str,
+    limit: int = 20,
+    class_filter: Optional[str] = None,
+    namespace_filter: Optional[str] = None,
+    response_format: str = "markdown",
+) -> str:
     """Search the Polars API for functions, methods, and classes.
 
-    For conceptual questions, combine this with polars_get_guide to get both:
-    - Available functions and their signatures (from this search)
-    - Conceptual understanding of when/how to use them (from guides)
-
-    For specific API lookup (e.g., "what parameters does filter take?"), you can use this alone or follow up with polars_get_docstring.
-
-    Searches through all public Polars API elements including DataFrame methods,
-    LazyFrame methods, Series methods, expressions, and top-level functions.
+    Results are grouped by class/namespace for easy navigation.
 
     Args:
-        query (str): Search term to match against API names and documentation
-        limit (int): Maximum number of results to return (default 20)
-        response_format (str): 'markdown' or 'json'
+        query: Search term (e.g., "filter", "string", "aggregate")
+        limit: Maximum results (default 20)
+        class_filter: Limit to specific class: "DataFrame", "LazyFrame", "Expr", "Series"
+        namespace_filter: Limit to namespace: "str", "dt", "list", "arr", "cat", "struct", "bin", "name", "meta"
+        response_format: "markdown" (default) or "json"
 
-    Returns:
-        str: Search results in the specified format
+    Examples:
+        - polars_search_api("filter") -> all filter-related methods
+        - polars_search_api("contains", class_filter="Expr", namespace_filter="str") -> Expr.str.contains
+        - polars_search_api("date", namespace_filter="dt") -> all datetime methods
     """
-    try:
-        # Perform the search
-        results = search_index(query, limit)
+    results = search_index(query, limit, class_filter, namespace_filter)
 
-        # Handle no results
-        if not results:
-            return f"No results found for query: '{query}'\n\nTry:\n- Using different search terms\n- Checking spelling\n- Using polars_get_guide for conceptual questions"
+    if not results:
+        msg = f"No results for '{query}'"
+        if class_filter or namespace_filter:
+            msg += f" with filters (class={class_filter}, namespace={namespace_filter})"
+        msg += "\n\nTry:\n- Broader search terms\n- Remove filters\n- Use `polars_browse` to explore available methods"
+        return msg
 
-        # JSON format - always return full results
-        if response_format == "json":
-            return json.dumps(
-                {"query": query, "count": len(results), "results": results},
-                indent=2,
+    if response_format == "json":
+        return json.dumps(
+            {"query": query, "count": len(results), "results": results}, indent=2
+        )
+
+    grouped = group_search_results(results)
+    output = format_grouped_results(query, grouped, len(results))
+
+    return output
+
+
+@mcp.tool(
+    name="polars_browse",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+async def polars_browse(category: str, limit: int = 50) -> str:
+    """Browse all methods in a class or namespace.
+
+    Use this to explore what's available without searching.
+
+    Args:
+        category: What to browse. Options:
+            - "DataFrame", "LazyFrame", "Expr", "Series" - all methods in class
+            - "Expr.str", "Expr.dt", "Expr.list", etc. - methods in namespace
+            - "functions" - top-level functions like col(), lit(), when()
+            - "namespaces" - list all available namespaces
+        limit: Maximum methods to show (default 50)
+
+    Examples:
+        - polars_browse("namespaces") -> see all available namespaces
+        - polars_browse("Expr.str") -> all string methods
+        - polars_browse("functions") -> col, lit, when, concat, etc.
+    """
+    registry = get_namespace_registry()
+    index = get_api_index()
+
+    # Special case: list all namespaces
+    if category.lower() == "namespaces":
+        lines = ["# Available Namespaces\n"]
+        lines.append('Use `polars_browse("Class.namespace")` to explore methods.\n')
+
+        for class_name in ["DataFrame", "LazyFrame", "Expr", "Series"]:
+            if class_name in registry:
+                namespaces = [k for k in registry[class_name].keys() if k != "_methods"]
+                if namespaces:
+                    lines.append(f"## {class_name}")
+                    for ns in sorted(namespaces):
+                        count = len(registry[class_name][ns])
+                        lines.append(f"- **{class_name}.{ns}** ({count} methods)")
+                    lines.append("")
+
+        return "\n".join(lines)
+
+    parts = category.split(".")
+
+    if len(parts) == 1:
+        class_name = parts[0]
+        if class_name == "functions":
+            methods = registry.get("functions", {}).get("_methods", [])
+        elif class_name in registry:
+            methods = registry[class_name].get("_methods", [])
+        else:
+            return f"Unknown category: {category}\n\nValid options: DataFrame, LazyFrame, Expr, Series, functions, namespaces, or Class.namespace (e.g., Expr.str)"
+
+        lines = [f"# {class_name} Methods\n"]
+        lines.append(f"Showing {min(len(methods), limit)} of {len(methods)} methods:\n")
+
+        for method in sorted(methods)[:limit]:
+            full_name = (
+                method if class_name == "functions" else f"{class_name}.{method}"
             )
+            info = index.get(full_name, {})
+            sig = info.get("signature", "")
+            short_desc = info.get("short_description", "")
 
-        # Markdown format with size checking
-        result = format_search_results(query, results, is_truncated=False)
+            if sig and sig != "(...)":
+                sig_preview = sig if len(sig) < 50 else sig[:47] + "..."
+                lines.append(f"- **{method}**`{sig_preview}`")
+            else:
+                lines.append(f"- **{method}**")
 
-        # Check if we exceed character limit
-        if len(result) > CHARACTER_LIMIT:
-            # Truncate results to approximately half
-            original_count = len(results)
-            truncated_count = max(1, len(results) // 2)  # Keep at least 1 result
-            results = results[:truncated_count]
+            if short_desc:
+                lines.append(f"  {short_desc}")
 
-            # Rebuild with truncated results
-            result = format_search_results(
-                query, results, total_count=original_count, is_truncated=True
-            )
+        if class_name in registry:
+            namespaces = [k for k in registry[class_name].keys() if k != "_methods"]
+            if namespaces:
+                lines.append(f"\n## Available Namespaces for {class_name}")
+                for ns in sorted(namespaces):
+                    lines.append(
+                        f"- {class_name}.{ns} ({len(registry[class_name][ns])} methods)"
+                    )
 
-        return result
+        return "\n".join(lines)
 
-    except Exception as e:
-        return f"Error searching API: {str(e)}"
+    elif len(parts) == 2:
+        class_name, ns_name = parts
+        if class_name not in registry or ns_name not in registry[class_name]:
+            available = [
+                k for k in registry.get(class_name, {}).keys() if k != "_methods"
+            ]
+            return f"Namespace '{ns_name}' not found in {class_name}.\n\nAvailable: {', '.join(available) if available else 'none'}"
+
+        methods = registry[class_name][ns_name]
+
+        lines = [f"# {class_name}.{ns_name} Namespace\n"]
+        lines.append(f"Showing {min(len(methods), limit)} of {len(methods)} methods:\n")
+
+        for method in sorted(methods)[:limit]:
+            full_name = f"{class_name}.{ns_name}.{method}"
+            info = index.get(full_name, {})
+            sig = info.get("signature", "")
+            short_desc = info.get("short_description", "")
+
+            if sig and sig != "(...)":
+                sig_preview = sig if len(sig) < 50 else sig[:47] + "..."
+                lines.append(f"- **{method}**`{sig_preview}`")
+            else:
+                lines.append(f"- **{method}**")
+
+            if short_desc:
+                lines.append(f"  {short_desc}")
+
+        return "\n".join(lines)
+
+    return f"Invalid category format: {category}\n\nUse: 'DataFrame', 'Expr.str', 'functions', or 'namespaces'"
 
 
 @mcp.tool(
     name="polars_get_docstring",
-    annotations={
-        "title": "Get Polars API docstrings",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
+    annotations={"readOnlyHint": True, "idempotentHint": True},
 )
-async def polars_get_docstring(params: GetDocstringInput) -> str:
+async def polars_get_docstring(name: str, response_format: str = "markdown") -> str:
     """Get complete documentation for a specific Polars API element.
 
-    Use this when you need the full docstring for a specific function/method you already know the name of.
-
-    For discovering what functions are available, use polars_search_api first.
-    For understanding concepts, combine polars_get_guide with polars_search_api.
-
-    Retrieves the full docstring, signature, and metadata for any public
-    Polars function, method, or class.
+    Includes signature, full docstring, and related methods.
 
     Args:
-        params (GetDocstringInput): Parameters containing:
-            - name (str): Full name like 'DataFrame.filter', 'col', 'LazyFrame'
-            - response_format (str): 'markdown' or 'json'
-
-    Returns:
-        str: Complete documentation in the specified format
+        name: Full API name like 'DataFrame.filter', 'Expr.str.contains', 'col'
+        response_format: "markdown" (default) or "json"
     """
-    try:
-        index = get_api_index()
+    index = get_api_index()
+    normalized = normalize_api_name(name)
 
-        name = normalize_api_name(params.name)
+    # Exact match
+    if normalized in index:
+        item = {"name": normalized, **index[normalized]}
+    else:
+        # Case-insensitive fallback
+        name_lower = normalized.lower()
+        matches = [k for k in index.keys() if k.lower() == name_lower]
+        if not matches:
+            similar = [k for k in index.keys() if name_lower in k.lower()][:5]
+            msg = f"'{name}' not found."
+            if similar:
+                msg += f"\n\nDid you mean: {', '.join(similar)}"
+            msg += (
+                "\n\nUse `polars_search_api` to search, or `polars_browse` to explore."
+            )
+            return msg
+        item = {"name": matches[0], **index[matches[0]]}
 
-        # Try exact match first
-        if name in index:
-            item = {"name": name, **index[name]}
-        else:
-            # Try case-insensitive match
-            name_lower = name.lower()
-            matches = [k for k in index.keys() if k.lower() == name_lower]
+    if response_format == "json":
+        return json.dumps(item, indent=2)
 
-            if not matches:
-                return f"API element '{params.name}' not found. Use polars_search_api to find the correct name."
+    lines = [f"# {item['full_name']}\n"]
+    lines.append(f"**Type:** {item['type']}")
 
-            item = {"name": matches[0], **index[matches[0]]}
+    if item.get("class"):
+        lines.append(f"**Class:** {item['class']}")
 
-        if params.response_format == ResponseFormat.JSON:
-            return json.dumps(item, indent=2)
-        else:
-            return format_api_item_markdown(item)
+    if item.get("namespace"):
+        lines.append(f"**Namespace:** {item['namespace']}")
 
-    except Exception as e:
-        return f"Error retrieving documentation: {str(e)}"
+    if item["signature"]:
+        lines.append(
+            f"\n**Signature:**\n```python\n{item['name']}{item['signature']}\n```"
+        )
+
+    lines.append(f"\n## Documentation\n\n{item['docstring']}")
+
+    related = find_related_methods(item["name"], index)
+    if related:
+        lines.append("\n## Related Methods")
+        for rel in related:
+            rel_info = index.get(rel, {})
+            short_desc = rel_info.get("short_description", "")
+            lines.append(f"- **{rel}**: {short_desc}" if short_desc else f"- **{rel}**")
+
+    return "\n".join(lines)
 
 
 def main():
