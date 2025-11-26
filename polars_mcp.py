@@ -2,7 +2,7 @@ import inspect
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import polars as pl
 from mcp.server.fastmcp import FastMCP
@@ -45,7 +45,7 @@ class GuideType(str, Enum):
 
 
 # API Index - built on first access
-_api_index: Optional[Dict[str, Any]] = None
+_api_index: dict[str, Any] | None = None
 
 
 def _create_test_instance(class_name: str, cls: type) -> Any:
@@ -73,7 +73,7 @@ def _create_test_instance(class_name: str, cls: type) -> Any:
     return None
 
 
-def build_api_index() -> Dict[str, Any]:
+def build_api_index() -> dict[str, Any]:
     """Build index of Polars API by introspecting the module.
 
     Uses _accessors metadata + minimal test instances for namespace discovery.
@@ -226,7 +226,7 @@ def build_api_index() -> Dict[str, Any]:
     return index
 
 
-def get_api_index() -> Dict[str, Any]:
+def get_api_index() -> dict[str, Any]:
     """Get or build the API index."""
     global _api_index
     if _api_index is None:
@@ -281,7 +281,7 @@ def calculate_match_score(query: str, name: str, docstring: str) -> float:
     return 0.0
 
 
-def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+def search_index(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Search the API index for matching items.
 
     Args:
@@ -311,7 +311,7 @@ def search_index(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     return results[:limit]
 
 
-def format_api_item_markdown(item: Dict[str, Any]) -> str:
+def format_api_item_markdown(item: dict[str, Any]) -> str:
     """Format an API item as markdown."""
     lines = [f"## {item['full_name']}"]
 
@@ -438,8 +438,8 @@ async def polars_get_guide(params: GetGuideInput) -> str:
 
 def format_search_results(
     query: str,
-    results: List[Dict[str, Any]],
-    total_count: Optional[int] = None,
+    results: list[dict[str, Any]],
+    total_count: int | None = None,
     is_truncated: bool = False,
 ) -> str:
     """Format search results as markdown.
