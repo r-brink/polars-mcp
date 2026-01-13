@@ -9,7 +9,6 @@ license-files = ["LICENSE"]
 dependencies = [
     "mcp>=1.0.0",
     "polars",
-    "pydantic>=2.0.0",
 ]
 
 [project.scripts]
