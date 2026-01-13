@@ -1,9 +1,11 @@
 [project]
 name = "polars-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server providing Polars API reference and usage guides for efficient Polars query development"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp>=1.0.0",
     "polars",
@@ -28,4 +30,5 @@ include = [
     "polars_mcp.py",
     "guides/",
     "README.md",
+    "LICENSE",
 ]
