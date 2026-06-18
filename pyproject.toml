@@ -8,6 +8,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
     "mcp>=1.0.0",
+    "fastmcp>3.0",
     "polars",
 ]
 
