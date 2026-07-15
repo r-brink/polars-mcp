@@ -1,6 +1,15 @@
+"""MCP server that introspects the locally installed Polars package.
+
+Companion to the Polars agent skill
+(https://github.com/polars-inc/skills/tree/main/polars): the skill covers
+methodology, this server verifies API names and signatures. What agents see
+of this server is the FastMCP ``instructions`` string and the tool
+docstrings below — keep those aligned with the skill when either changes.
+"""
+
 import inspect
 import json
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 from fastmcp import Context, FastMCP
@@ -16,16 +25,45 @@ async def api_lifespan(server: FastMCP):
 
 mcp = FastMCP(
     "polars-mcp",
+    version="0.3.0",
+    website_url="https://github.com/r-brink/polars-mcp",
     lifespan=api_lifespan,
     instructions=(
-        "Companion tool for the Polars agent skill. Use to verify Polars API "
-        "method names and signatures before writing code. Three tools available: "
-        "polars_search_api to find methods by keyword, polars_browse to explore "
-        "a class or namespace, polars_get_docstring for the full signature and "
-        "documentation of a specific method. All results reflect the locally "
-        "installed Polars version."
+        "Companion tool for the Polars agent skill "
+        "(https://github.com/polars-inc/skills/tree/main/polars). If a 'polars' "
+        "skill is available in your environment, load it for methodology "
+        "(lazy API, expression contexts, pandas translation) and use these "
+        "tools to verify Polars API method names and signatures before writing "
+        "code. Three tools available: polars_search_api to find methods by "
+        "keyword, polars_browse to explore a class or namespace, "
+        "polars_get_docstring for the full signature and documentation of a "
+        "specific method. All results reflect the locally installed Polars "
+        f"version: {pl.__version__}."
     ),
 )
+
+MAIN_CLASSES = [
+    ("DataFrame", pl.DataFrame),
+    ("LazyFrame", pl.LazyFrame),
+    ("Series", pl.Series),
+    ("Expr", pl.Expr),
+]
+
+
+def _discover_namespaces() -> tuple[str, ...]:
+    names: set[str] = set()
+    for _, cls in MAIN_CLASSES:
+        names |= set(getattr(cls, "_accessors", ()))
+    # fall back to the namespaces known at time of writing if the internal
+    # _accessors attribute ever disappears (Literal needs >= 1 value)
+    if not names:
+        names = {"str", "dt", "list", "arr", "cat", "struct", "bin", "name", "meta"}
+    return tuple(sorted(names))
+
+
+ClassFilter = Literal["DataFrame", "LazyFrame", "Expr", "Series"]
+NamespaceFilter = Literal[_discover_namespaces()]  # type: ignore[valid-type]
+ResponseFormat = Literal["markdown", "json"]
 
 
 def _create_test_instance(class_name: str, cls: type) -> Any:
@@ -56,14 +94,7 @@ def build_api_index() -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
     index = {}
     namespace_registry: dict[str, dict[str, list[str]]] = {}
 
-    main_classes = [
-        ("DataFrame", pl.DataFrame),
-        ("LazyFrame", pl.LazyFrame),
-        ("Series", pl.Series),
-        ("Expr", pl.Expr),
-    ]
-
-    for class_name, cls in main_classes:
+    for class_name, cls in MAIN_CLASSES:
         namespace_registry[class_name] = {"_methods": []}
 
         doc = inspect.getdoc(cls)
@@ -157,7 +188,7 @@ def build_api_index() -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
         if name.startswith("_"):
             continue
         obj = getattr(pl, name)
-        if inspect.isclass(obj) and name in [c[0] for c in main_classes]:
+        if inspect.isclass(obj) and name in [c[0] for c in MAIN_CLASSES]:
             continue
         if inspect.isclass(obj):
             doc = inspect.getdoc(obj)
@@ -225,10 +256,10 @@ def search_index(
     limit: int = 20,
     class_filter: str | None = None,
     namespace_filter: str | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     terms = [t.strip() for t in query.lower().replace(",", " ").split() if t.strip()]
     if not terms:
-        return []
+        return [], 0
 
     results = []
     for name, info in index.items():
@@ -246,7 +277,7 @@ def search_index(
             results.append({"score": total_score, "name": name, **info})
 
     results.sort(key=lambda x: (-x["score"], x["name"]))
-    return results[:limit]
+    return results[:limit], len(results)
 
 
 def group_search_results(
@@ -281,9 +312,16 @@ def group_search_results(
 
 
 def format_grouped_results(
-    query: str, grouped: dict[str, list[dict[str, Any]]], total: int
+    query: str, grouped: dict[str, list[dict[str, Any]]], shown: int, total: int
 ) -> str:
-    lines = [f"# Search Results for '{query}'\n", f"Found {total} results:\n"]
+    lines = [f"# Search Results for '{query}'\n"]
+    if total > shown:
+        lines.append(
+            f"Showing top {shown} of {total} matches "
+            "(raise `limit` or add filters to narrow down):\n"
+        )
+    else:
+        lines.append(f"Found {total} results:\n")
     order = ["functions", "DataFrame", "LazyFrame", "Series", "Expr"]
 
     def sort_key(g: str) -> tuple:
@@ -360,9 +398,9 @@ async def polars_search_api(
     query: str,
     ctx: Context,
     limit: int = 20,
-    class_filter: str | None = None,
-    namespace_filter: str | None = None,
-    response_format: str = "markdown",
+    class_filter: ClassFilter | None = None,
+    namespace_filter: NamespaceFilter | None = None,
+    response_format: ResponseFormat = "markdown",
 ) -> str:
     """Find Polars methods and functions by keyword.
 
@@ -373,8 +411,9 @@ async def polars_search_api(
         query: Search term (e.g., "filter", "string upper", "aggregate")
         limit: Maximum results (default 20)
         class_filter: Limit to "DataFrame", "LazyFrame", "Expr", or "Series"
-        namespace_filter: Limit to "str", "dt", "list", "arr", "cat",
-            "struct", "bin", "name", or "meta"
+        namespace_filter: Limit to an expression namespace such as "str" or
+            "dt" (valid values are introspected from the installed Polars;
+            see polars_browse("namespaces") for the full list)
         response_format: "markdown" (default) or "json"
 
     Examples:
@@ -383,7 +422,7 @@ async def polars_search_api(
         polars_search_api("date", namespace_filter="dt")
     """
     index = ctx.lifespan_context["api_index"]
-    results = search_index(index, query, limit, class_filter, namespace_filter)
+    results, total = search_index(index, query, limit, class_filter, namespace_filter)
 
     if not results:
         msg = f"No results for '{query}'"
@@ -394,11 +433,17 @@ async def polars_search_api(
 
     if response_format == "json":
         return json.dumps(
-            {"query": query, "count": len(results), "results": results}, indent=2
+            {
+                "query": query,
+                "shown": len(results),
+                "total_matches": total,
+                "results": results,
+            },
+            indent=2,
         )
 
     grouped = group_search_results(results)
-    return format_grouped_results(query, grouped, len(results))
+    return format_grouped_results(query, grouped, len(results), total)
 
 
 @mcp.tool(
@@ -527,7 +572,7 @@ async def polars_browse(category: str, ctx: Context, limit: int = 50) -> str:
     annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def polars_get_docstring(
-    name: str, ctx: Context, response_format: str = "markdown"
+    name: str, ctx: Context, response_format: ResponseFormat = "markdown"
 ) -> str:
     """Get the full signature and documentation for a specific Polars API element.
 
