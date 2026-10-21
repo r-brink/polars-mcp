@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 # Initialize MCP server
-mcp = FastMCP("polars_mcp")
+mcp = MCPServer("polars_mcp")
 
 # Constants
 CHARACTER_LIMIT = 25000
@@ -31,6 +31,21 @@ def load_guide(filename: str) -> str:
         return f"Guide file not found: {filename}"
     except Exception as e:
         return f"Error loading guide: {str(e)}"
+
+
+def _register_guide_resource(guide_name: str, filename: str) -> None:
+    def read_guide() -> str:
+        return load_guide(filename)
+
+    mcp.resource(
+        f"polars://guides/{guide_name}",
+        name=guide_name,
+        mime_type="text/markdown",
+    )(read_guide)
+
+
+for guide_name, filename in GUIDE_FILES.items():
+    _register_guide_resource(guide_name, filename)
 
 
 # API Index - built on first access
@@ -687,7 +702,7 @@ async def polars_get_docstring(name: str, response_format: str = "markdown") -> 
 
 
 def main():
-    mcp.run()
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
