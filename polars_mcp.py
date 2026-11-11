@@ -1,13 +1,14 @@
 import inspect
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 # Initialize MCP server
-mcp = FastMCP("polars_mcp")
+mcp = MCPServer("polars_mcp")
 
 # Constants
 CHARACTER_LIMIT = 25000
@@ -21,6 +22,14 @@ GUIDE_FILES = {
 }
 
 
+def _limit_response(text: str) -> str:
+    """Keep tool responses within the supported character limit."""
+    if len(text) <= CHARACTER_LIMIT:
+        return text
+    suffix = "\n\n[Response truncated to fit the character limit.]"
+    return text[: CHARACTER_LIMIT - len(suffix)] + suffix
+
+
 def load_guide(filename: str) -> str:
     """Load a guide file from the guides directory."""
     guide_path = GUIDES_DIR / filename
@@ -29,8 +38,23 @@ def load_guide(filename: str) -> str:
             return f.read()
     except FileNotFoundError:
         return f"Guide file not found: {filename}"
-    except Exception as e:
-        return f"Error loading guide: {str(e)}"
+    except (OSError, UnicodeError) as e:
+        return f"Error loading guide: {e!s}"
+
+
+def _register_guide_resource(guide_name: str, filename: str) -> None:
+    def read_guide() -> str:
+        return load_guide(filename)
+
+    mcp.resource(
+        f"polars://guides/{guide_name}",
+        name=guide_name,
+        mime_type="text/markdown",
+    )(read_guide)
+
+
+for guide_name, filename in GUIDE_FILES.items():
+    _register_guide_resource(guide_name, filename)
 
 
 # API Index - built on first access
@@ -49,7 +73,7 @@ def _create_test_instance(class_name: str, cls: type) -> Any:
             return pl.DataFrame({"_": [1]})
         elif class_name == "LazyFrame":
             return pl.LazyFrame({"_": [1]})
-    except Exception:
+    except (TypeError, ValueError, pl.exceptions.PolarsError):
         return None
     return None
 
@@ -169,7 +193,13 @@ def build_api_index() -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
                                 }
                             except (AttributeError, TypeError):
                                 continue
-                    except Exception:
+                    except (
+                        AttributeError,
+                        ImportError,
+                        TypeError,
+                        ValueError,
+                        pl.exceptions.PolarsError,
+                    ):
                         continue
 
             except (AttributeError, TypeError):
@@ -288,6 +318,9 @@ def search_index(
     namespace_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search the API index with optional filters. Supports multi-word queries (OR logic - matches any term)."""
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+
     index = get_api_index()
 
     # Split query into terms for multi-word search
@@ -316,7 +349,7 @@ def search_index(
         if total_score > 0:
             results.append({"score": total_score, "name": name, **info})
 
-    results.sort(key=lambda x: (-x["score"], x["name"]))
+    results.sort(key=lambda x: (-cast(float, x["score"]), x["name"]))
     return results[:limit]
 
 
@@ -430,7 +463,7 @@ def find_related_methods(name: str, index: dict[str, Any]) -> list[str]:
 
     if namespace and item_class:
         prefix = f"{item_class}.{namespace}."
-        siblings = [k for k in index.keys() if k.startswith(prefix) and k != name]
+        siblings = [k for k in index if k.startswith(prefix) and k != name]
         related.extend(siblings[:5])
 
     return related[:8]
@@ -438,7 +471,7 @@ def find_related_methods(name: str, index: dict[str, Any]) -> list[str]:
 
 @mcp.tool(
     name="polars_get_guide",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
+    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 )
 async def polars_get_guide(guide: str) -> str:
     """Get a conceptual guide about Polars usage patterns.
@@ -460,7 +493,7 @@ async def polars_get_guide(guide: str) -> str:
 
 @mcp.tool(
     name="polars_search_api",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
+    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 )
 async def polars_search_api(
     query: str,
@@ -485,6 +518,9 @@ async def polars_search_api(
         - polars_search_api("contains", class_filter="Expr", namespace_filter="str") -> Expr.str.contains
         - polars_search_api("date", namespace_filter="dt") -> all datetime methods
     """
+    if limit < 0:
+        return "limit must be non-negative"
+
     results = search_index(query, limit, class_filter, namespace_filter)
 
     if not results:
@@ -495,19 +531,21 @@ async def polars_search_api(
         return msg
 
     if response_format == "json":
-        return json.dumps(
-            {"query": query, "count": len(results), "results": results}, indent=2
+        return _limit_response(
+            json.dumps(
+                {"query": query, "count": len(results), "results": results}, indent=2
+            )
         )
 
     grouped = group_search_results(results)
     output = format_grouped_results(query, grouped, len(results))
 
-    return output
+    return _limit_response(output)
 
 
 @mcp.tool(
     name="polars_browse",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
+    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 )
 async def polars_browse(category: str, limit: int = 50) -> str:
     """Browse all methods in a class or namespace.
@@ -527,6 +565,9 @@ async def polars_browse(category: str, limit: int = 50) -> str:
         - polars_browse("Expr.str") -> all string methods
         - polars_browse("functions") -> col, lit, when, concat, etc.
     """
+    if limit < 0:
+        return "limit must be non-negative"
+
     registry = get_namespace_registry()
     index = get_api_index()
 
@@ -537,7 +578,7 @@ async def polars_browse(category: str, limit: int = 50) -> str:
 
         for class_name in ["DataFrame", "LazyFrame", "Expr", "Series"]:
             if class_name in registry:
-                namespaces = [k for k in registry[class_name].keys() if k != "_methods"]
+                namespaces = [k for k in registry[class_name] if k != "_methods"]
                 if namespaces:
                     lines.append(f"## {class_name}")
                     for ns in sorted(namespaces):
@@ -545,7 +586,7 @@ async def polars_browse(category: str, limit: int = 50) -> str:
                         lines.append(f"- **{class_name}.{ns}** ({count} methods)")
                     lines.append("")
 
-        return "\n".join(lines)
+        return _limit_response("\n".join(lines))
 
     parts = category.split(".")
 
@@ -579,7 +620,7 @@ async def polars_browse(category: str, limit: int = 50) -> str:
                 lines.append(f"  {short_desc}")
 
         if class_name in registry:
-            namespaces = [k for k in registry[class_name].keys() if k != "_methods"]
+            namespaces = [k for k in registry[class_name] if k != "_methods"]
             if namespaces:
                 lines.append(f"\n## Available Namespaces for {class_name}")
                 for ns in sorted(namespaces):
@@ -587,14 +628,12 @@ async def polars_browse(category: str, limit: int = 50) -> str:
                         f"- {class_name}.{ns} ({len(registry[class_name][ns])} methods)"
                     )
 
-        return "\n".join(lines)
+        return _limit_response("\n".join(lines))
 
     elif len(parts) == 2:
         class_name, ns_name = parts
         if class_name not in registry or ns_name not in registry[class_name]:
-            available = [
-                k for k in registry.get(class_name, {}).keys() if k != "_methods"
-            ]
+            available = [k for k in registry.get(class_name, {}) if k != "_methods"]
             return f"Namespace '{ns_name}' not found in {class_name}.\n\nAvailable: {', '.join(available) if available else 'none'}"
 
         methods = registry[class_name][ns_name]
@@ -617,14 +656,14 @@ async def polars_browse(category: str, limit: int = 50) -> str:
             if short_desc:
                 lines.append(f"  {short_desc}")
 
-        return "\n".join(lines)
+        return _limit_response("\n".join(lines))
 
     return f"Invalid category format: {category}\n\nUse: 'DataFrame', 'Expr.str', 'functions', or 'namespaces'"
 
 
 @mcp.tool(
     name="polars_get_docstring",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
+    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 )
 async def polars_get_docstring(name: str, response_format: str = "markdown") -> str:
     """Get complete documentation for a specific Polars API element.
@@ -644,9 +683,9 @@ async def polars_get_docstring(name: str, response_format: str = "markdown") -> 
     else:
         # Case-insensitive fallback
         name_lower = normalized.lower()
-        matches = [k for k in index.keys() if k.lower() == name_lower]
+        matches = [k for k in index if k.lower() == name_lower]
         if not matches:
-            similar = [k for k in index.keys() if name_lower in k.lower()][:5]
+            similar = [k for k in index if name_lower in k.lower()][:5]
             msg = f"'{name}' not found."
             if similar:
                 msg += f"\n\nDid you mean: {', '.join(similar)}"
@@ -657,7 +696,7 @@ async def polars_get_docstring(name: str, response_format: str = "markdown") -> 
         item = {"name": matches[0], **index[matches[0]]}
 
     if response_format == "json":
-        return json.dumps(item, indent=2)
+        return _limit_response(json.dumps(item, indent=2))
 
     lines = [f"# {item['full_name']}\n"]
     lines.append(f"**Type:** {item['type']}")
@@ -683,11 +722,11 @@ async def polars_get_docstring(name: str, response_format: str = "markdown") -> 
             short_desc = rel_info.get("short_description", "")
             lines.append(f"- **{rel}**: {short_desc}" if short_desc else f"- **{rel}**")
 
-    return "\n".join(lines)
+    return _limit_response("\n".join(lines))
 
 
 def main():
-    mcp.run()
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

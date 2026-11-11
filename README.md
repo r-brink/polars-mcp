@@ -141,7 +141,26 @@ Name: "DataFrame.filter"
 Returns: Full documentation with signature and examples
 ```
 
+### polars_browse
+
+Browse methods in a Polars class or namespace, or explore top-level functions.
+
+**Parameters:**
+
+- `category` (str): A class, namespace, `functions`, or `namespaces`
+- `limit` (int, optional): Maximum methods to show (default: 50)
+
+**Example:**
+
+```
+Category: "Expr.str"
+Returns: Available string namespace methods
+```
+
 ## Available Guides
+
+Each guide is exposed as a readable MCP resource and is also available through
+`polars_get_guide`.
 
 ### polars://guides/contexts
 
